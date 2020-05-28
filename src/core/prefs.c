@@ -87,6 +87,7 @@ static GDesktopTitlebarAction action_double_click_titlebar = G_DESKTOP_TITLEBAR_
 static GDesktopTitlebarAction action_middle_click_titlebar = G_DESKTOP_TITLEBAR_ACTION_LOWER;
 static GDesktopTitlebarAction action_right_click_titlebar = G_DESKTOP_TITLEBAR_ACTION_MENU;
 static gboolean dynamic_workspaces = FALSE;
+static gboolean dynamic_blur = TRUE;
 static gboolean disable_workarounds = FALSE;
 static gboolean auto_raise = FALSE;
 static gboolean auto_raise_delay = 500;
@@ -142,6 +143,10 @@ static void shell_shows_app_menu_changed (GtkSettings *settings,
                                           gpointer     data);
 
 static void update_cursor_size_from_gtk (GtkSettings *settings,
+                                         GParamSpec *pspec,
+                                         gpointer data);
+
+static void update_cursor_theme_from_gtk (GtkSettings *settings,
                                          GParamSpec *pspec,
                                          gpointer data);
 static void update_cursor_size (void);
@@ -309,6 +314,13 @@ static MetaBoolPreference preferences_bool[] =
         META_PREF_TITLEBAR_FONT, /* note! shares a pref */
       },
       &use_system_font,
+    },
+    {
+      { "dynamic-blur",
+        SCHEMA_MUTTER,
+        META_PREF_DYNAMIC_BLUR,
+      },
+      &dynamic_blur,
     },
     {
       { "dynamic-workspaces",
@@ -981,8 +993,12 @@ meta_prefs_init (void)
                     G_CALLBACK (shell_shows_app_menu_changed), NULL);
 
   if (!meta_is_wayland_compositor ())
-    g_signal_connect (gtk_settings_get_default (), "notify::gtk-cursor-theme-size",
-                      G_CALLBACK (update_cursor_size_from_gtk), NULL);
+    {
+      g_signal_connect (gtk_settings_get_default (), "notify::gtk-cursor-theme-size",
+                        G_CALLBACK (update_cursor_size_from_gtk), NULL);
+      g_signal_connect (gtk_settings_get_default (), "notify::gtk-cursor-theme-name",
+                        G_CALLBACK (update_cursor_theme_from_gtk), NULL);
+    }
 
   settings = g_settings_new (SCHEMA_INPUT_SOURCES);
   g_signal_connect (settings, "changed::" KEY_XKB_OPTIONS,
@@ -1283,6 +1299,30 @@ update_cursor_size_from_gtk (GtkSettings *settings,
     }
 }
 
+static void
+update_cursor_theme_from_gtk (GtkSettings *settings,
+                             GParamSpec *pspec,
+                             gpointer data)
+{
+  GdkScreen *screen = gdk_screen_get_default ();
+  GValue value = G_VALUE_INIT;
+  char* xsettings_cursor_theme = NULL;
+
+  g_value_init (&value, G_TYPE_STRING);
+  if (gdk_screen_get_setting (screen, "gtk-cursor-theme-name", &value))
+    {
+      xsettings_cursor_theme = g_strdup (g_value_get_string (&value));
+    }
+
+  if (g_strcmp0(xsettings_cursor_theme, cursor_theme) != 0)
+    {
+      if (cursor_theme)
+        g_free (cursor_theme);
+      cursor_theme = xsettings_cursor_theme;
+      queue_changed (META_PREF_CURSOR_THEME);
+    }
+}
+
 /**
  * maybe_give_disable_workaround_warning:
  *
@@ -1477,40 +1517,9 @@ button_function_from_string (const char *str)
     return META_BUTTON_FUNCTION_MAXIMIZE;
   else if (strcmp (str, "close") == 0)
     return META_BUTTON_FUNCTION_CLOSE;
-  else if (strcmp (str, "shade") == 0)
-    return META_BUTTON_FUNCTION_SHADE;
-  else if (strcmp (str, "above") == 0)
-    return META_BUTTON_FUNCTION_ABOVE;
-  else if (strcmp (str, "stick") == 0)
-    return META_BUTTON_FUNCTION_STICK;
   else
     /* don't know; give up */
     return META_BUTTON_FUNCTION_LAST;
-}
-
-static MetaButtonFunction
-button_opposite_function (MetaButtonFunction ofwhat)
-{
-  switch (ofwhat)
-    {
-    case META_BUTTON_FUNCTION_SHADE:
-      return META_BUTTON_FUNCTION_UNSHADE;
-    case META_BUTTON_FUNCTION_UNSHADE:
-      return META_BUTTON_FUNCTION_SHADE;
-
-    case META_BUTTON_FUNCTION_ABOVE:
-      return META_BUTTON_FUNCTION_UNABOVE;
-    case META_BUTTON_FUNCTION_UNABOVE:
-      return META_BUTTON_FUNCTION_ABOVE;
-
-    case META_BUTTON_FUNCTION_STICK:
-      return META_BUTTON_FUNCTION_UNSTICK;
-    case META_BUTTON_FUNCTION_UNSTICK:
-      return META_BUTTON_FUNCTION_STICK;
-
-    default:
-      return META_BUTTON_FUNCTION_LAST;
-    }
 }
 
 static gboolean
@@ -1556,12 +1565,6 @@ button_layout_handler (GVariant *value,
           if (i > 0 && strcmp("spacer", buttons[b]) == 0)
             {
               new_layout.left_buttons_has_spacer[i-1] = TRUE;
-              f = button_opposite_function (f);
-
-              if (f != META_BUTTON_FUNCTION_LAST)
-                {
-                  new_layout.left_buttons_has_spacer[i-2] = TRUE;
-                }
             }
           else
             {
@@ -1571,10 +1574,6 @@ button_layout_handler (GVariant *value,
                   used[f] = TRUE;
                   ++i;
 
-                  f = button_opposite_function (f);
-
-                  if (f != META_BUTTON_FUNCTION_LAST)
-                      new_layout.left_buttons[i++] = f;
                 }
               else
                 {
@@ -1618,11 +1617,6 @@ button_layout_handler (GVariant *value,
           if (i > 0 && strcmp("spacer", buttons[b]) == 0)
             {
               new_layout.right_buttons_has_spacer[i-1] = TRUE;
-              f = button_opposite_function (f);
-              if (f != META_BUTTON_FUNCTION_LAST)
-                {
-                  new_layout.right_buttons_has_spacer[i-2] = TRUE;
-                }
             }
           else
             {
@@ -1631,11 +1625,6 @@ button_layout_handler (GVariant *value,
                   new_layout.right_buttons[i] = f;
                   used[f] = TRUE;
                   ++i;
-
-                  f = button_opposite_function (f);
-
-                  if (f != META_BUTTON_FUNCTION_LAST)
-                      new_layout.right_buttons[i++] = f;
 
                 }
               else
@@ -1794,6 +1783,12 @@ meta_prefs_get_dynamic_workspaces (void)
 }
 
 gboolean
+meta_prefs_get_dynamic_blur (void)
+{
+  return dynamic_blur;
+}
+
+gboolean
 meta_prefs_get_disable_workarounds (void)
 {
   return disable_workarounds;
@@ -1898,6 +1893,9 @@ meta_preference_to_string (MetaPreference pref)
 
     case META_PREF_DRAG_THRESHOLD:
       return "DRAG_TRHESHOLD";
+
+    case META_PREF_DYNAMIC_BLUR:
+      return "DYNAMIC_BLUR";
 
     case META_PREF_DYNAMIC_WORKSPACES:
       return "DYNAMIC_WORKSPACES";

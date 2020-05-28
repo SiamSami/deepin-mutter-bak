@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -82,6 +82,7 @@ struct _MetaBackendX11Private
   gchar *keymap_layouts;
   gchar *keymap_variants;
   gchar *keymap_options;
+  int locked_group;
 };
 typedef struct _MetaBackendX11Private MetaBackendX11Private;
 
@@ -297,15 +298,23 @@ handle_host_xevent (MetaBackend *backend,
 
   if (event->type == priv->xkb_event_base)
     {
-      XkbAnyEvent *xkb_ev = (XkbAnyEvent *) event;
+      XkbEvent *xkb_ev = (XkbEvent *) event;
 
-      if (xkb_ev->device == META_VIRTUAL_CORE_KEYBOARD_ID)
+      if (xkb_ev->any.device == META_VIRTUAL_CORE_KEYBOARD_ID)
         {
-          switch (xkb_ev->xkb_type)
+          switch (xkb_ev->any.xkb_type)
             {
             case XkbNewKeyboardNotify:
             case XkbMapNotify:
               keymap_changed (backend);
+              break;
+            case XkbStateNotify:
+              if (xkb_ev->state.changed & XkbGroupLockMask)
+                {
+                  if (priv->locked_group != xkb_ev->state.locked_group)
+                    XkbLockGroup (priv->xdisplay, XkbUseCoreKbd, priv->locked_group);
+                }
+              break;
             default:
               break;
             }
@@ -409,6 +418,7 @@ x_event_source_new (MetaBackend *backend)
 static void
 take_touch_grab (MetaBackend *backend)
 {
+#if 0
   MetaBackendX11 *x11 = META_BACKEND_X11 (backend);
   MetaBackendX11Private *priv = meta_backend_x11_get_instance_private (x11);
   unsigned char mask_bits[XIMaskLen (XI_LASTEVENT)] = { 0 };
@@ -422,6 +432,7 @@ take_touch_grab (MetaBackend *backend)
   XIGrabTouchBegin (priv->xdisplay, META_VIRTUAL_CORE_POINTER_ID,
                     DefaultRootWindow (priv->xdisplay),
                     False, &mask, 1, &mods);
+#endif
 }
 
 static void
@@ -776,6 +787,7 @@ meta_backend_x11_lock_layout_group (MetaBackend *backend,
   MetaBackendX11 *x11 = META_BACKEND_X11 (backend);
   MetaBackendX11Private *priv = meta_backend_x11_get_instance_private (x11);
 
+  priv->locked_group = idx;
   XkbLockGroup (priv->xdisplay, XkbUseCoreKbd, idx);
 }
 
@@ -828,9 +840,9 @@ meta_backend_x11_select_stage_events (MetaBackend *backend)
        * When we're a nested application, we want to behave like any other
        * application, so select these events like normal apps do.
        */
-      XISetMask (mask.mask, XI_TouchBegin);
-      XISetMask (mask.mask, XI_TouchEnd);
-      XISetMask (mask.mask, XI_TouchUpdate);
+      /*XISetMask (mask.mask, XI_TouchBegin);*/
+      /*XISetMask (mask.mask, XI_TouchEnd);*/
+      /*XISetMask (mask.mask, XI_TouchUpdate);*/
     }
 
   XISelectEvents (priv->xdisplay, xwin, &mask, 1);

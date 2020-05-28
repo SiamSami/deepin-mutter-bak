@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -33,17 +33,19 @@
 
 struct _MetaWaylandBuffer
 {
+  GObject parent;
+
   struct wl_resource *resource;
-  struct wl_signal destroy_signal;
   struct wl_listener destroy_listener;
 
   CoglTexture *texture;
-  uint32_t ref_count;
 };
 
+#define META_TYPE_WAYLAND_BUFFER (meta_wayland_buffer_get_type ())
+G_DECLARE_FINAL_TYPE (MetaWaylandBuffer, meta_wayland_buffer,
+                      META, WAYLAND_BUFFER, GObject);
+
 MetaWaylandBuffer *     meta_wayland_buffer_from_resource       (struct wl_resource    *resource);
-void                    meta_wayland_buffer_ref                 (MetaWaylandBuffer     *buffer);
-void                    meta_wayland_buffer_unref               (MetaWaylandBuffer     *buffer);
 CoglTexture *           meta_wayland_buffer_ensure_texture      (MetaWaylandBuffer     *buffer);
 void                    meta_wayland_buffer_process_damage      (MetaWaylandBuffer     *buffer,
                                                                  cairo_region_t        *region);

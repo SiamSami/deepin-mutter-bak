@@ -194,6 +194,7 @@ async_get_property_finish (xcb_connection_t          *xcb_conn,
 {
   xcb_get_property_reply_t *reply;
   xcb_generic_error_t *error;
+  int length;
 
   reply = xcb_get_property_reply (xcb_conn, cookie, &error);
   if (error)
@@ -209,8 +210,15 @@ async_get_property_finish (xcb_connection_t          *xcb_conn,
   results->prop = NULL;
 
   if (results->type != None)
-    results->prop = g_memdup (xcb_get_property_value (reply),
-                              xcb_get_property_value_length (reply));
+    {
+      length = xcb_get_property_value_length (reply);
+      /* Leave room for a trailing '\0' since xcb doesn't return null-terminated
+       * strings
+       */
+      results->prop = g_malloc (length + 1);
+      memcpy (results->prop, xcb_get_property_value (reply), length);
+      results->prop[length] = '\0';
+    }
 
   free (reply);
   return (results->prop != NULL);
@@ -296,6 +304,8 @@ motif_hints_from_results (GetPropertyResults *results,
 
   if (results->type == None || results->n_items <= 0)
     {
+      g_free (results->prop);
+      results->prop = NULL;
       meta_verbose ("Motif hints had unexpected type or n_items\n");
       return FALSE;
     }
@@ -306,10 +316,18 @@ motif_hints_from_results (GetPropertyResults *results,
    */
   *hints_p = calloc (1, sizeof (MotifWmHints));
   if (*hints_p == NULL)
-    return FALSE;
+    {
+      g_free (results->prop);
+      results->prop = NULL;
+      return FALSE;
+    }
 
   memcpy(*hints_p, results->prop, MIN (sizeof (MotifWmHints),
                                        results->n_items * sizeof (uint32_t)));
+
+  g_free (results->prop);
+  results->prop = NULL;
+
   return TRUE;
 }
 
@@ -340,6 +358,9 @@ latin1_string_from_results (GetPropertyResults *results,
     return FALSE;
 
   *str_p = g_strndup ((char *) results->prop, results->n_items);
+
+  g_free (results->prop);
+  results->prop = NULL;
 
   return TRUE;
 }
@@ -387,6 +408,9 @@ utf8_string_from_results (GetPropertyResults *results,
     }
 
   *str_p = g_strndup ((char *) results->prop, results->n_items);
+
+  g_free (results->prop);
+  results->prop = NULL;
 
   return TRUE;
 }
@@ -764,7 +788,11 @@ size_hints_from_results (GetPropertyResults *results,
     return FALSE;
 
   if (results->n_items < OldNumPropSizeElements)
-    return FALSE;
+    {
+      g_free (results->prop);
+      results->prop = NULL;
+      return FALSE;
+    }
 
   raw = (xPropSizeHints*) results->prop;
 
@@ -895,6 +923,8 @@ meta_prop_get_values (MetaDisplay   *display,
             case META_PROP_VALUE_SYNC_COUNTER_LIST:
 	      values[i].required_type = XA_CARDINAL;
               break;
+            case META_PROP_VALUE_DEEPIN_BLUR_MASK:
+              values[i].required_type = display->atom__NET_WM_DEEPIN_BLUR_REGION_MASK;
             }
         }
 
@@ -960,6 +990,11 @@ meta_prop_get_values (MetaDisplay   *display,
           if (!latin1_string_from_results (&results,
                                            &values[i].v.str))
             values[i].type = META_PROP_VALUE_INVALID;
+          break;
+        case META_PROP_VALUE_DEEPIN_BLUR_MASK:
+          values[i].v.mask.data = results.prop;
+          values[i].v.mask.size = results.n_items;
+          results.prop = NULL;
           break;
         case META_PROP_VALUE_STRING_AS_UTF8:
           if (!latin1_string_from_results (&results,
@@ -1032,6 +1067,9 @@ meta_prop_get_values (MetaDisplay   *display,
           break;
         }
 
+      if (results.prop != NULL)
+        g_free (results.prop);
+
     next:
       ++i;
     }
@@ -1049,6 +1087,9 @@ free_value (MetaPropValue *value)
     case META_PROP_VALUE_UTF8:
     case META_PROP_VALUE_STRING:
       free (value->v.str);
+      break;
+    case META_PROP_VALUE_DEEPIN_BLUR_MASK:
+      free (value->v.mask.data);
       break;
     case META_PROP_VALUE_STRING_AS_UTF8:
       g_free (value->v.str);

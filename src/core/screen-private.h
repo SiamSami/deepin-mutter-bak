@@ -85,11 +85,9 @@ struct _MetaScreen
   /* Cache the current monitor */
   int last_monitor_index;
 
-#ifdef HAVE_STARTUP_NOTIFICATION
-  SnMonitorContext *sn_context;
   GSList *startup_sequences;
-  guint startup_sequence_timeout;
-#endif
+
+  GList *blur_actors;
 
   Window wm_cm_selection_window;
   guint work_area_later;
@@ -103,12 +101,19 @@ struct _MetaScreen
 
   guint keys_grabbed : 1;
 
+  guint corner_actions_enabled: 1;
+
   int closing;
 
   /* Instead of unmapping withdrawn windows we can leave them mapped
    * and restack them below a guard window. When using a compositor
    * this allows us to provide live previews of unmapped windows */
   Window guard_window;
+
+  /* Windows used to support hot-zone functionality.
+   */
+  Window corner_windows[4];
+  gint corner_enabled[4];
 
   Window composite_overlay_window;
 };
@@ -216,6 +221,8 @@ void meta_screen_set_active_workspace_hint (MetaScreen *screen);
 
 void meta_screen_create_guard_window (MetaScreen *screen);
 
+void meta_screen_create_corner_window (MetaScreen *screen);
+
 gboolean meta_screen_handle_xevent (MetaScreen *screen,
                                     XEvent     *xevent);
 
@@ -223,5 +230,9 @@ int meta_screen_xinerama_index_to_monitor_index (MetaScreen *screen,
                                                  int         index);
 int meta_screen_monitor_index_to_xinerama_index (MetaScreen *screen,
                                                  int         index);
+gboolean meta_screen_has_tiled_window_for_monitor (MetaTileMode tile_mode, 
+                                                   MetaWindow* window);
+MetaWindow* meta_screen_get_tiled_window_for_monitor (MetaTileMode tile_mode, 
+                                                      MetaWindow* window);
 
 #endif

@@ -389,7 +389,7 @@ meta_window_apply_session_info (MetaWindow *window,
                   "Restoring minimized state %d for window %s\n",
                   info->minimized, window->desc);
 
-      if (window->has_minimize_func && info->minimized)
+      if (info->minimized)
         meta_window_minimize (window);
     }
 
@@ -543,12 +543,9 @@ meta_window_x11_manage (MetaWindow *window)
    * window hints, as that's what the ICCCM says to do.
    */
 
-  if (window->override_redirect)
-    {
-      priv->client_rect = window->rect;
-      window->buffer_rect = window->rect;
-    }
-  else
+  priv->client_rect = window->rect;
+  window->buffer_rect = window->rect;
+  if (!window->override_redirect)
     {
       MetaRectangle rect;
       MetaMoveResizeFlags flags;
@@ -601,8 +598,9 @@ meta_window_x11_unmanage (MetaWindow *window)
     {
       /* We need to put WM_STATE so that others will understand it on
        * restart.
+       * DEEPIN: do not update state for override-redirect windows.
        */
-      if (!window->minimized)
+      if (!window->override_redirect && !window->minimized)
         meta_window_x11_set_wm_state (window);
 
       /* If we're unmanaging a window that is not withdrawn, then
@@ -1068,6 +1066,18 @@ meta_window_x11_move_resize_internal (MetaWindow                *window,
   size_dx = constrained_rect.x - window->rect.width;
   size_dy = constrained_rect.y - window->rect.height;
 
+  meta_topic (META_DEBUG_GEOMETRY,
+              "%s %d,%d, unconstrained %d,%d, %d,%d, "
+              "constrained %d,%d %d,%d"
+              "client_rect: %d,%d %d,%d\n",
+              window->desc, window->rect.x, window->rect.y,
+              unconstrained_rect.x, unconstrained_rect.y,
+              unconstrained_rect.width, unconstrained_rect.height,
+              constrained_rect.x, constrained_rect.y,
+              constrained_rect.width, constrained_rect.height,
+              priv->client_rect.x, priv->client_rect.y,
+              priv->client_rect.width, priv->client_rect.height);
+
   window->rect = constrained_rect;
 
   if (window->frame)
@@ -1118,7 +1128,9 @@ meta_window_x11_move_resize_internal (MetaWindow                *window,
     }
 
   if (client_rect.x != priv->client_rect.x ||
-      client_rect.y != priv->client_rect.y)
+      client_rect.y != priv->client_rect.y ||
+      unconstrained_rect.x != constrained_rect.x ||
+      unconstrained_rect.y != constrained_rect.y)
     {
       need_move_client = TRUE;
       priv->client_rect.x = client_rect.x;
@@ -1180,6 +1192,11 @@ meta_window_x11_move_resize_internal (MetaWindow                *window,
       ((window->size_hints.flags & PPosition) ||
        (window->size_hints.flags & USPosition)))
     need_configure_notify = TRUE;
+
+  meta_verbose ("%s: need_move_frame %d, need_move_client %d, "
+                "need_resize_frame %d, need_resize_client %d\n", __func__,
+                need_move_frame, need_move_client, need_resize_frame,
+                need_resize_client);
 
   /* The rest of this function syncs our new size/pos with X as
    * efficiently as possible
@@ -1735,9 +1752,9 @@ meta_window_x11_update_input_region (MetaWindow *window)
           region = cairo_region_create ();
         }
       else if (n_rects == 1 &&
-               (rects[0].x == 0 ||
-                rects[0].y == 0 ||
-                rects[0].width == priv->client_rect.width ||
+               (rects[0].x == 0 &&
+                rects[0].y == 0 &&
+                rects[0].width == priv->client_rect.width &&
                 rects[0].height == priv->client_rect.height))
         {
           /* This is the bounding region case. Keep the
@@ -1850,6 +1867,12 @@ meta_window_x11_update_shape_region (MetaWindow *window)
        * this is simply the client area.
        */
       cairo_region_intersect_rectangle (region, &client_area);
+
+      /* Some applications might explicitly set their bounding region
+       * to the client area. Detect these cases, and throw out the
+       * bounding region in this case. */
+      if (cairo_region_contains_rectangle (region, &client_area) == CAIRO_REGION_OVERLAP_IN)
+        g_clear_pointer (&region, cairo_region_destroy);
     }
 
   meta_window_set_shape_region (window, region);
@@ -2191,6 +2214,248 @@ query_pressed_buttons (MetaWindow *window)
   return button;
 }
 
+static void     update_move           (MetaWindow   *window,
+                                       gboolean      snap,
+                                       int           x,
+                                       int           y);
+
+static gboolean
+update_move_timeout (gpointer data)
+{
+  MetaWindow *window = data;
+
+  update_move (window,
+               window->display->grab_last_user_action_was_snap,
+               window->display->grab_latest_motion_x,
+               window->display->grab_latest_motion_y);
+
+  return FALSE;
+}
+
+static gboolean
+meta_window_can_tile_maximized (MetaWindow *window)
+{
+  return window->has_maximize_func;
+}
+
+
+static void
+update_move (MetaWindow  *window,
+             gboolean     snap,
+             int          x,
+             int          y)
+{
+  int dx, dy;
+  int new_x, new_y;
+  MetaRectangle old;
+  int shake_threshold;
+  MetaDisplay *display = window->display;
+
+  display->grab_latest_motion_x = x;
+  display->grab_latest_motion_y = y;
+
+  dx = x - display->grab_anchor_root_x;
+  dy = y - display->grab_anchor_root_y;
+
+  new_x = display->grab_anchor_window_pos.x + dx;
+  new_y = display->grab_anchor_window_pos.y + dy;
+
+  meta_verbose ("x,y = %d,%d anchor ptr %d,%d anchor pos %d,%d dx,dy %d,%d\n",
+                x, y,
+                display->grab_anchor_root_x,
+                display->grab_anchor_root_y,
+                display->grab_anchor_window_pos.x,
+                display->grab_anchor_window_pos.y,
+                dx, dy);
+
+  /* Don't bother doing anything if no move has been specified.  (This
+   * happens often, even in keyboard moving, due to the warping of the
+   * pointer.
+   */
+  if (dx == 0 && dy == 0)
+    return;
+
+  /* Originally for detaching maximized windows, but we use this
+   * for the zones at the sides of the monitor where trigger tiling
+   * because it's about the right size
+   */
+#define DRAG_THRESHOLD_TO_SHAKE_THRESHOLD_FACTOR 6
+  shake_threshold = meta_prefs_get_drag_threshold () *
+    DRAG_THRESHOLD_TO_SHAKE_THRESHOLD_FACTOR;
+
+  if (snap)
+    {
+      /* We don't want to tile while snapping. Also, clear any previous tile
+         request. */
+      window->tile_mode = META_TILE_NONE;
+      window->tile_monitor_number = -1;
+    }
+  else if (meta_prefs_get_edge_tiling () &&
+           !META_WINDOW_MAXIMIZED (window) &&
+           !META_WINDOW_TILED_SIDE_BY_SIDE (window))
+    {
+      const MetaMonitorInfo *monitor;
+      MetaRectangle work_area;
+
+      /* For side-by-side tiling we are interested in the inside vertical
+       * edges of the work area of the monitor where the pointer is located,
+       * and in the outside top edge for maximized tiling.
+       *
+       * For maximized tiling we use the outside edge instead of the
+       * inside edge, because we don't want to force users to maximize
+       * windows they are placing near the top of their screens.
+       *
+       * The "current" idea of meta_window_get_work_area_current_monitor() and
+       * meta_screen_get_current_monitor() is slightly different: the former
+       * refers to the monitor which contains the largest part of the window,
+       * the latter to the one where the pointer is located.
+       */
+      monitor = meta_screen_get_current_monitor_info_for_pos (window->screen, x, y);
+      meta_window_get_work_area_for_monitor (window,
+                                             monitor->number,
+                                             &work_area);
+
+      /* Check if the cursor is in a position which triggers tiling
+       * and set tile_mode accordingly.
+       */
+      if (meta_window_can_tile_side_by_side (window) &&
+          x >= monitor->rect.x && x < (work_area.x + shake_threshold))
+        window->tile_mode = META_TILE_LEFT;
+      else if (meta_window_can_tile_side_by_side (window) &&
+               x >= work_area.x + work_area.width - shake_threshold &&
+               x < (monitor->rect.x + monitor->rect.width))
+        window->tile_mode = META_TILE_RIGHT;
+      else if (meta_window_can_tile_maximized (window) &&
+               y >= monitor->rect.y && y <= work_area.y)
+        window->tile_mode = META_TILE_MAXIMIZED;
+      else
+        window->tile_mode = META_TILE_NONE;
+
+      if (window->tile_mode != META_TILE_NONE)
+        window->tile_monitor_number = monitor->number;
+    }
+
+  /* shake loose (unmaximize) maximized or tiled window if dragged beyond
+   * the threshold in the Y direction. Tiled windows can also be pulled
+   * loose via X motion.
+   */
+
+  if ((META_WINDOW_MAXIMIZED (window) && ABS (dy) >= shake_threshold) ||
+      (META_WINDOW_TILED_SIDE_BY_SIDE (window) && (MAX (ABS (dx), ABS (dy)) >= shake_threshold)))
+    {
+      double prop;
+
+      /* Shake loose, so that the window snaps back to maximized
+       * when dragged near the top; do not snap back if tiling
+       * is enabled, as top edge tiling can be used in that case
+       */
+      window->shaken_loose = !meta_prefs_get_edge_tiling ();
+      window->tile_mode = META_TILE_NONE;
+
+      /* move the unmaximized window to the cursor */
+      prop =
+        ((double)(x - display->grab_initial_window_pos.x)) /
+        ((double)display->grab_initial_window_pos.width);
+
+      display->grab_initial_window_pos.x = x - window->saved_rect.width * prop;
+
+      /* If we started dragging the window from above the top of the window,
+       * pretend like we started dragging from the middle of the titlebar
+       * instead, as the "correct" anchoring looks wrong. */
+      if (display->grab_anchor_root_y < display->grab_initial_window_pos.y)
+        {
+          MetaRectangle titlebar_rect;
+          meta_window_get_titlebar_rect (window, &titlebar_rect);
+          display->grab_anchor_root_y = display->grab_initial_window_pos.y + titlebar_rect.height / 2;
+        }
+
+      window->saved_rect.x = display->grab_initial_window_pos.x;
+      window->saved_rect.y = display->grab_initial_window_pos.y;
+
+      meta_window_unmaximize (window, META_MAXIMIZE_BOTH);
+      return;
+    }
+
+  /* remaximize window on another monitor if window has been shaken
+   * loose or it is still maximized (then move straight)
+   */
+  else if ((window->shaken_loose || META_WINDOW_MAXIMIZED (window)) &&
+           window->tile_mode != META_TILE_LEFT && window->tile_mode != META_TILE_RIGHT)
+    {
+      const MetaMonitorInfo *wmonitor;
+      MetaRectangle work_area;
+      int monitor;
+
+      window->tile_mode = META_TILE_NONE;
+      wmonitor = window->monitor;
+
+      for (monitor = 0; monitor < window->screen->n_monitor_infos; monitor++)
+        {
+          meta_window_get_work_area_for_monitor (window, monitor, &work_area);
+
+          /* check if cursor is near the top of a monitor work area */
+          if (x >= work_area.x &&
+              x < (work_area.x + work_area.width) &&
+              y >= work_area.y &&
+              y < (work_area.y + shake_threshold))
+            {
+              /* move the saved rect if window will become maximized on an
+               * other monitor so user isn't surprised on a later unmaximize
+               */
+              if (wmonitor->number != monitor)
+                {
+                  window->saved_rect.x = work_area.x;
+                  window->saved_rect.y = work_area.y;
+
+                  if (window->frame)
+                    {
+                      window->saved_rect.x += window->frame->child_x;
+                      window->saved_rect.y += window->frame->child_y;
+                    }
+
+                  window->unconstrained_rect.x = window->saved_rect.x;
+                  window->unconstrained_rect.y = window->saved_rect.y;
+
+                  meta_window_unmaximize (window, META_MAXIMIZE_BOTH);
+
+                  display->grab_initial_window_pos = work_area;
+                  display->grab_anchor_root_x = x;
+                  display->grab_anchor_root_y = y;
+                  window->shaken_loose = FALSE;
+
+                  meta_window_maximize (window, META_MAXIMIZE_BOTH);
+                }
+
+              return;
+            }
+        }
+    }
+
+  /* Delay showing the tile preview slightly to make it more unlikely to
+   * trigger it unwittingly, e.g. when shaking loose the window or moving
+   * it to another monitor.
+   */
+  meta_screen_update_tile_preview (window->screen,
+                                   window->tile_mode != META_TILE_NONE);
+
+  meta_window_get_frame_rect (window, &old);
+
+  /* Don't allow movement in the maximized directions or while tiled */
+  if (window->maximized_horizontally || META_WINDOW_TILED_SIDE_BY_SIDE (window))
+    new_x = old.x;
+  if (window->maximized_vertically)
+    new_y = old.y;
+
+  /* Do any edge resistance/snapping */
+  meta_window_edge_resistance_for_move (window,
+                                        &new_x,
+                                        &new_y,
+                                        update_move_timeout,
+                                        snap,
+                                        FALSE);
+
+  meta_window_move_frame (window, TRUE, new_x, new_y);
+}
 gboolean
 meta_window_x11_client_message (MetaWindow *window,
                                 XEvent     *event)
@@ -2441,9 +2706,40 @@ meta_window_x11_client_message (MetaWindow *window,
     {
       meta_verbose ("WM_CHANGE_STATE client message, state: %ld\n",
                     event->xclient.data.l[0]);
-      if (event->xclient.data.l[0] == IconicState &&
-          window->has_minimize_func)
+      if (event->xclient.data.l[0] == IconicState)
         meta_window_minimize (window);
+
+      return TRUE;
+    }
+  else if (event->xclient.message_type ==
+           display->atom__DEEPIN_MOVE_UPDATE)
+    {
+      int x_root;
+      int y_root;
+      int action;
+      MetaGrabOp op;
+      int button;
+      guint32 timestamp;
+
+
+      x_root = event->xclient.data.l[0];
+      y_root = event->xclient.data.l[1];
+      /*action = event->xclient.data.l[2];*/
+      /*button = event->xclient.data.l[3];*/
+
+      /* FIXME: What a braindead protocol; no timestamp?!? */
+      timestamp = meta_display_get_current_time_roundtrip (display);
+      meta_topic (META_DEBUG_WINDOW_OPS,
+                  "Received _DEEPIN_MOVE_UPDATE message on %s, %d,%d action = %d, button %d\n",
+                  window->desc,
+                  x_root, y_root, action, button);
+
+      if (meta_grab_op_is_moving (window->display->grab_op))
+        {
+          update_move (window,
+                       FALSE,
+                       x_root, y_root);
+        }
 
       return TRUE;
     }
@@ -2567,8 +2863,11 @@ meta_window_x11_client_message (MetaWindow *window,
               if (button != 0)
                 window->display->grab_button = button;
               else
+              {
+                  meta_verbose("GRAB: %s: button is none", __func__);
                 meta_display_end_grab_op (window->display,
                                           timestamp);
+              }
             }
           else
             {
@@ -2586,7 +2885,10 @@ meta_window_x11_client_message (MetaWindow *window,
                */
 
               if ((button_mask & (1 << button)) == 0)
-                meta_display_end_grab_op (window->display, timestamp);
+              {
+                  meta_verbose("GRAB: %s: mask is none, button = %d\n", __func__, button);
+                /*meta_display_end_grab_op (window->display, timestamp);*/
+              }
             }
         }
 
@@ -2812,6 +3114,13 @@ is_our_xwindow (MetaDisplay       *display,
 
   if (xwindow == screen->guard_window)
     return TRUE;
+
+  int i;
+  for (i = 0; i < 4; i++) 
+    {
+      if (xwindow == screen->corner_windows[i])
+        return TRUE;
+    }
 
   if (xwindow == screen->composite_overlay_window)
     return TRUE;

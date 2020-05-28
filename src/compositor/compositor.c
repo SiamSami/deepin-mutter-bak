@@ -550,6 +550,7 @@ meta_compositor_unmanage (MetaCompositor *compositor)
        * before giving up the window manager selection or the next
        * window manager won't be able to redirect subwindows */
       XCompositeUnredirectSubwindows (xdisplay, xroot, CompositeRedirectManual);
+      meta_verbose ("%s\n", __func__);
     }
 }
 
@@ -680,6 +681,18 @@ meta_compositor_window_shape_changed (MetaCompositor *compositor,
 }
 
 void
+meta_compositor_window_blur_changed (MetaCompositor *compositor,
+                                      MetaWindow     *window)
+{
+  MetaWindowActor *window_actor;
+  window_actor = META_WINDOW_ACTOR (meta_window_get_compositor_private (window));
+  if (!window_actor)
+    return;
+
+  meta_window_actor_update_blur_background (window_actor);
+}
+
+void
 meta_compositor_window_opacity_changed (MetaCompositor *compositor,
                                         MetaWindow     *window)
 {
@@ -727,6 +740,8 @@ meta_compositor_process_event (MetaCompositor *compositor,
           window = meta_display_lookup_x_window (compositor->display, xwin);
         }
 
+      meta_verbose ("%s: xwin 0x%x metawin %p (%s)\n", __func__,
+              ((XDamageNotifyEvent *) event)->drawable, window, window ? window->desc:NULL);
       if (window)
         process_damage (compositor, (XDamageNotifyEvent *) event, window);
     }
@@ -769,6 +784,14 @@ meta_compositor_hide_window (MetaCompositor *compositor,
 {
   MetaWindowActor *window_actor = META_WINDOW_ACTOR (meta_window_get_compositor_private (window));
   meta_window_actor_hide (window_actor, effect);
+}
+
+void
+meta_compositor_tile_window (MetaCompositor *compositor,
+                             MetaWindow     *window)
+{
+  MetaWindowActor *window_actor = META_WINDOW_ACTOR (meta_window_get_compositor_private (window));
+  meta_window_actor_tile (window_actor, META_COMP_EFFECT_TILE);
 }
 
 void
@@ -1245,6 +1268,48 @@ meta_compositor_flash_screen (MetaCompositor *compositor,
 
   g_signal_connect (transition, "stopped",
                     G_CALLBACK (flash_out_completed), flash);
+
+  clutter_actor_restore_easing_state (flash);
+}
+
+static void
+window_flash_out_completed (ClutterTimeline *timeline,
+                            gboolean         is_finished,
+                            gpointer         user_data)
+{
+  ClutterActor *flash = CLUTTER_ACTOR (user_data);
+  clutter_actor_destroy (flash);
+}
+
+void
+meta_compositor_flash_window (MetaCompositor *compositor,
+                              MetaWindow     *window)
+{
+  ClutterActor *window_actor =
+    CLUTTER_ACTOR (meta_window_get_compositor_private (window));
+  ClutterActor *flash;
+  ClutterTransition *transition;
+
+  flash = clutter_actor_new ();
+  clutter_actor_set_background_color (flash, CLUTTER_COLOR_Black);
+  clutter_actor_set_size (flash, window->rect.width, window->rect.height);
+  clutter_actor_set_position (flash,
+                              window->custom_frame_extents.left,
+                              window->custom_frame_extents.top);
+  clutter_actor_set_opacity (flash, 0);
+  clutter_actor_add_child (window_actor, flash);
+
+  clutter_actor_save_easing_state (flash);
+  clutter_actor_set_easing_mode (flash, CLUTTER_EASE_IN_QUAD);
+  clutter_actor_set_easing_duration (flash, FLASH_TIME_MS);
+  clutter_actor_set_opacity (flash, 192);
+
+  transition = clutter_actor_get_transition (flash, "opacity");
+  clutter_timeline_set_auto_reverse (CLUTTER_TIMELINE (transition), TRUE);
+  clutter_timeline_set_repeat_count (CLUTTER_TIMELINE (transition), 2);
+
+  g_signal_connect (transition, "stopped",
+                    G_CALLBACK (window_flash_out_completed), flash);
 
   clutter_actor_restore_easing_state (flash);
 }

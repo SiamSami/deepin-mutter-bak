@@ -40,6 +40,7 @@
 #include "keybindings-private.h"
 #include "stack.h"
 #include <meta/compositor.h>
+#include <meta/meta-blur-actor.h>
 #include <meta/meta-enum-types.h>
 #include "core.h"
 #include "meta-cursor-tracker-private.h"
@@ -71,11 +72,6 @@ static void prefs_changed_callback (MetaPreference pref,
 static void set_desktop_geometry_hint (MetaScreen *screen);
 static void set_desktop_viewport_hint (MetaScreen *screen);
 
-#ifdef HAVE_STARTUP_NOTIFICATION
-static void meta_screen_sn_event   (SnMonitorEvent *event,
-                                    void           *user_data);
-#endif
-
 static void on_monitors_changed (MetaMonitorManager *manager,
                                  MetaScreen         *screen);
 
@@ -90,6 +86,9 @@ enum
   WORKSPACE_ADDED,
   WORKSPACE_REMOVED,
   WORKSPACE_SWITCHED,
+  WORKSPACE_REORDERED,
+  CORNER_ENTERED,
+  CORNER_LEAVED,
   WINDOW_ENTERED_MONITOR,
   WINDOW_LEFT_MONITOR,
   STARTUP_SEQUENCE_CHANGED,
@@ -203,6 +202,17 @@ meta_screen_class_init (MetaScreenClass *klass)
                   G_TYPE_INT,
                   META_TYPE_MOTION_DIRECTION);
 
+  screen_signals[WORKSPACE_REORDERED] =
+    g_signal_new ("workspace-reordered",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE,
+                  2,
+                  G_TYPE_INT,
+                  G_TYPE_INT);
+
   screen_signals[WINDOW_ENTERED_MONITOR] =
     g_signal_new ("window-entered-monitor",
                   G_TYPE_FROM_CLASS (klass),
@@ -254,6 +264,26 @@ meta_screen_class_init (MetaScreenClass *klass)
                   0,
                   NULL, NULL, NULL,
 		  G_TYPE_NONE, 0);
+
+  screen_signals[CORNER_ENTERED] =
+    g_signal_new ("corner-entered",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE,
+                  1,
+                  G_TYPE_INT);
+
+  screen_signals[CORNER_LEAVED] =
+    g_signal_new ("corner-leaved",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE,
+                  1,
+                  G_TYPE_INT);
 
   g_object_class_install_property (object_class,
                                    PROP_N_WORKSPACES,
@@ -497,6 +527,76 @@ create_guard_window (Display *xdisplay, MetaScreen *screen)
   return guard_window;
 }
 
+#define CORNER_SIZE 32
+
+static Window
+create_screen_corner_window (Display *xdisplay, MetaScreen *screen, MetaScreenCorner corner, int x, int y)
+{
+  XSetWindowAttributes attributes;
+  Window edge_window;
+  gulong create_serial;
+  int w = CORNER_SIZE, h = CORNER_SIZE;
+
+  attributes.event_mask = PointerMotionMask | EnterWindowMask | LeaveWindowMask;
+  attributes.override_redirect = True;
+
+  /* We have to call record_add() after we have the new window ID,
+   * so save the serial for the CreateWindow request until then */
+  create_serial = XNextRequest(xdisplay);
+  edge_window =
+    XCreateWindow (xdisplay,
+		   screen->xroot,
+           //FIXME: topleft now
+		   x, /* x */
+		   y, /* y */
+		   w,
+		   h,
+		   0, /* border width */
+		   0, /* depth */
+		   InputOnly, /* class */
+		   CopyFromParent, /* visual */
+		   CWEventMask|CWOverrideRedirect,
+		   &attributes);
+
+  XStoreName (xdisplay, edge_window, "mutter topleft corner window");
+
+  {
+    MetaBackendX11 *backend = META_BACKEND_X11 (meta_get_backend ());
+    Display *backend_xdisplay = meta_backend_x11_get_xdisplay (backend);
+    unsigned char mask_bits[XIMaskLen (XI_LASTEVENT)] = { 0 };
+    XIEventMask mask = { XIAllMasterDevices, sizeof (mask_bits), mask_bits };
+
+    XISetMask (mask.mask, XI_Enter);
+    XISetMask (mask.mask, XI_Leave);
+    XISetMask (mask.mask, XI_Motion);
+
+    /* Sync on the connection we created the window on to
+     * make sure it's created before we select on it on the
+     * backend connection. */
+    XSync (xdisplay, False);
+
+    XISelectEvents (backend_xdisplay, edge_window, &mask, 1);
+  }
+
+  meta_stack_tracker_record_add (screen->stack_tracker,
+                                 edge_window,
+                                 create_serial);
+
+  {
+      XWindowChanges changes;
+
+      meta_error_trap_push (screen->display);
+
+      changes.stack_mode = Above;
+      XConfigureWindow (xdisplay, edge_window, CWStackMode, &changes);
+
+      meta_error_trap_pop (screen->display);
+  }
+
+  XMapWindow (xdisplay, edge_window);
+  return edge_window;
+}
+
 static Window
 take_manager_selection (MetaDisplay *display,
                         Window       xroot,
@@ -673,11 +773,21 @@ meta_screen_new (MetaDisplay *display,
 
   screen->active_workspace = NULL;
   screen->workspaces = NULL;
+  screen->blur_actors = NULL;
   screen->rows_of_workspaces = 1;
   screen->columns_of_workspaces = -1;
   screen->vertical_workspaces = FALSE;
   screen->starting_corner = META_SCREEN_TOPLEFT;
   screen->guard_window = None;
+  screen->corner_windows[0] = None;
+  screen->corner_windows[1] = None;
+  screen->corner_windows[2] = None;
+  screen->corner_windows[3] = None;
+  screen->corner_actions_enabled = TRUE;
+  screen->corner_enabled[0] = TRUE;
+  screen->corner_enabled[1] = TRUE;
+  screen->corner_enabled[2] = TRUE;
+  screen->corner_enabled[3] = TRUE;
 
   /* If we're a Wayland compositor, then we don't grab the COW, since it
    * will map it. */
@@ -729,17 +839,6 @@ meta_screen_new (MetaDisplay *display,
   screen->stack_tracker = meta_stack_tracker_new (screen);
 
   meta_prefs_add_listener (prefs_changed_callback, screen);
-
-#ifdef HAVE_STARTUP_NOTIFICATION
-  screen->sn_context =
-    sn_monitor_context_new (screen->display->sn_display,
-                            screen->number,
-                            meta_screen_sn_event,
-                            screen,
-                            NULL);
-  screen->startup_sequences = NULL;
-  screen->startup_sequence_timeout = 0;
-#endif
 
   meta_verbose ("Added screen %d ('%s') root 0x%lx\n",
                 screen->number, screen->screen_name, screen->xroot);
@@ -800,24 +899,6 @@ meta_screen_free (MetaScreen *screen,
 
   meta_screen_ungrab_keys (screen);
 
-#ifdef HAVE_STARTUP_NOTIFICATION
-  g_slist_foreach (screen->startup_sequences,
-                   (GFunc) sn_startup_sequence_unref, NULL);
-  g_slist_free (screen->startup_sequences);
-  screen->startup_sequences = NULL;
-
-  if (screen->startup_sequence_timeout != 0)
-    {
-      g_source_remove (screen->startup_sequence_timeout);
-      screen->startup_sequence_timeout = 0;
-    }
-  if (screen->sn_context)
-    {
-      sn_monitor_context_unref (screen->sn_context);
-      screen->sn_context = NULL;
-    }
-#endif
-
   meta_ui_free (screen->ui);
 
   meta_stack_free (screen->stack);
@@ -854,6 +935,74 @@ meta_screen_create_guard_window (MetaScreen *screen)
 {
   if (screen->guard_window == None)
     screen->guard_window = create_guard_window (screen->display->xdisplay, screen);
+}
+
+static void meta_screen_calc_corner_positions (MetaScreen *screen, int* positions)
+{
+    int width = screen->rect.width, height = screen->rect.height;
+
+    int n = screen->n_monitor_infos;
+    int tl_x, tl_y, tr_x, tr_y, bl_x, bl_y, br_x, br_y;
+
+    tl_x = 0;
+    tl_y = height;
+    bl_x = 0;
+    bl_y = 0;
+    for (int i = 0; i < n; i++) {
+        // test if monitor is on the left
+        MetaRectangle geo = screen->monitor_infos[i].rect;
+        if (geo.x != 0) {
+            continue;
+        }
+
+        tl_y = MIN (geo.y, tl_y);
+        bl_y = MAX (geo.y + geo.height, bl_y);
+    }
+
+
+    tr_x = width;
+    tr_y = height;
+    br_x = width;
+    br_y = 0;
+    for (int i = 0; i < n; i++) {
+        // test if monitor is on the right
+        MetaRectangle geo = screen->monitor_infos[i].rect;
+        if (geo.x + geo.width != width) {
+            continue;
+        }
+
+        tr_y = MIN (geo.y, tr_y);
+        br_y = MAX (geo.y + geo.height, br_y);
+    }
+
+    int result[] = {
+        tl_x, tl_y,
+        tr_x - CORNER_SIZE, tr_y,
+        bl_x, bl_y - CORNER_SIZE, 
+        br_x - CORNER_SIZE, br_y - CORNER_SIZE,
+    };
+
+    memcpy (positions, result, sizeof result);
+}
+
+void
+meta_screen_create_corner_window (MetaScreen *screen)
+{
+    MetaScreenCorner corners[] = {
+        META_SCREEN_TOPLEFT,
+        META_SCREEN_TOPRIGHT,
+        META_SCREEN_BOTTOMLEFT,
+        META_SCREEN_BOTTOMRIGHT,
+    };
+
+    int positions[8];
+    meta_screen_calc_corner_positions (screen, positions);
+
+    for (int i = 0; i < 4; i++) 
+    {
+        screen->corner_windows[i] = create_screen_corner_window (
+                screen->display->xdisplay, screen, corners[i], positions[i*2], positions[i*2+1]);
+    }
 }
 
 void
@@ -900,6 +1049,17 @@ prefs_changed_callback (MetaPreference pref,
   else if (pref == META_PREF_WORKSPACE_NAMES)
     {
       set_workspace_names (screen);
+    }
+  else if (pref == META_PREF_DYNAMIC_BLUR)
+    {
+      fprintf(stderr, "%s: dynamic_blur = %d\n", __func__,
+              meta_prefs_get_dynamic_blur ());
+      GList *l = screen->blur_actors;
+      while (l) {
+        MetaBlurActor *actor = META_BLUR_ACTOR (l->data);
+        meta_blur_actor_set_enabled (actor, meta_prefs_get_dynamic_blur ());
+        l = l->next;
+      }
     }
 }
 
@@ -1042,6 +1202,53 @@ set_desktop_viewport_hint (MetaScreen *screen)
                    XA_CARDINAL,
                    32, PropModeReplace, (guchar*) data, 2);
   meta_error_trap_pop (screen->display);
+}
+
+void
+meta_screen_reorder_workspace (MetaScreen    *screen,
+        MetaWorkspace *workspace,
+        int            new_index,
+        guint32        timestamp)
+{
+  GList     *l;
+  int       index;
+  int       from, to;
+  int       active_index;
+
+  active_index = meta_screen_get_active_workspace_index (screen);
+  l = g_list_find (screen->workspaces, workspace);
+  if (!l)
+    return;
+
+  index = meta_workspace_index (workspace);
+  if (new_index == index) 
+    return;
+
+  if (new_index < index) {
+      from = new_index;
+      to = index;
+  } else {
+      from = index;
+      to = new_index;
+  }
+
+  screen->workspaces = g_list_remove_link (screen->workspaces, l);
+  screen->workspaces = g_list_insert (screen->workspaces, l->data, new_index);
+
+  if (active_index != meta_screen_get_active_workspace_index (screen))
+    {
+      meta_screen_set_active_workspace_hint (screen);
+    }
+
+  for (; from <= to; from++) 
+    {
+      MetaWorkspace *w = g_list_nth_data(screen->workspaces, from);
+      meta_workspace_index_changed (w);
+    }
+
+  meta_screen_queue_workarea_recalc (screen);
+
+  g_signal_emit (screen, screen_signals[WORKSPACE_REORDERED], 0, index, new_index);
 }
 
 void
@@ -1267,7 +1474,8 @@ root_cursor_prepare_at (MetaCursorSprite *cursor_sprite,
   monitor = meta_screen_get_monitor_for_point (screen, x, y);
 
   /* Reload the cursor texture if the scale has changed. */
-  meta_cursor_sprite_set_theme_scale (cursor_sprite, monitor->scale);
+  if (monitor)
+    meta_cursor_sprite_set_theme_scale (cursor_sprite, monitor->scale);
 }
 
 static void
@@ -1397,6 +1605,42 @@ meta_screen_hide_tile_preview (MetaScreen *screen)
     g_source_remove (screen->tile_preview_timeout_id);
 
   meta_compositor_hide_tile_preview (screen->display->compositor);
+}
+
+MetaWindow*
+meta_screen_get_tiled_window_for_monitor (MetaTileMode tile_mode, 
+                                          MetaWindow* window)
+{
+  MetaWindow *target;
+  MetaStack *stack;
+
+  if (tile_mode == META_TILE_NONE || tile_mode == META_TILE_MAXIMIZED)
+    return FALSE;
+
+  stack = window->screen->stack;
+
+  for (target = meta_stack_get_top (stack);
+       target;
+       target = meta_stack_get_below (stack, target, FALSE))
+    {
+      /* shaded or minimized is accounted for matching here.
+       */
+      if (//!target->shaded && !target->minimized &&
+        target != window &&
+        target->tile_mode == tile_mode &&
+        target->monitor == window->monitor &&
+        meta_window_get_workspace (target) == meta_window_get_workspace (window))
+        return target;
+    }
+
+  return NULL;
+}
+
+gboolean
+meta_screen_has_tiled_window_for_monitor (MetaTileMode tile_mode, 
+                                          MetaWindow* window)
+{
+  return meta_screen_get_tiled_window_for_monitor (tile_mode, window) != NULL;
 }
 
 MetaWindow*
@@ -2434,6 +2678,25 @@ on_monitors_changed (MetaMonitorManager *manager,
                        &changes);
     }
 
+  if (screen->corner_windows[0] != None) 
+    {
+      int positions[8];
+      meta_screen_calc_corner_positions (screen, positions);
+
+      int i;
+      for (i = 0; i < 4; i++) 
+        {
+          XWindowChanges changes;
+
+          changes.x = positions[i*2];
+          changes.y = positions[i*2+1];
+          changes.stack_mode = Above;
+
+          XConfigureWindow(screen->display->xdisplay, screen->corner_windows[i],
+                           CWX | CWY |CWStackMode, &changes);
+        }
+    }
+
   /* Fix up monitor for all windows on this screen */
   meta_screen_foreach_window (screen, META_LIST_INCLUDE_OVERRIDE_REDIRECT, (MetaScreenWindowFunc) meta_window_update_for_monitors_changed, 0);
 
@@ -2538,208 +2801,6 @@ meta_screen_unshow_desktop (MetaScreen *screen)
   meta_screen_update_showing_desktop_hint (screen);
 }
 
-
-#ifdef HAVE_STARTUP_NOTIFICATION
-static gboolean startup_sequence_timeout (void *data);
-
-static void
-update_startup_feedback (MetaScreen *screen)
-{
-  if (screen->startup_sequences != NULL)
-    {
-      meta_topic (META_DEBUG_STARTUP,
-                  "Setting busy cursor\n");
-      meta_screen_set_cursor (screen, META_CURSOR_BUSY);
-    }
-  else
-    {
-      meta_topic (META_DEBUG_STARTUP,
-                  "Setting default cursor\n");
-      meta_screen_set_cursor (screen, META_CURSOR_DEFAULT);
-    }
-}
-
-static void
-add_sequence (MetaScreen        *screen,
-              SnStartupSequence *sequence)
-{
-  meta_topic (META_DEBUG_STARTUP,
-              "Adding sequence %s\n",
-              sn_startup_sequence_get_id (sequence));
-  sn_startup_sequence_ref (sequence);
-  screen->startup_sequences = g_slist_prepend (screen->startup_sequences,
-                                               sequence);
-
-  /* our timeout just polls every second, instead of bothering
-   * to compute exactly when we may next time out
-   */
-  if (screen->startup_sequence_timeout == 0)
-    {
-      screen->startup_sequence_timeout = g_timeout_add_seconds (1,
-                                                                startup_sequence_timeout,
-                                                                screen);
-      g_source_set_name_by_id (screen->startup_sequence_timeout,
-                               "[mutter] startup_sequence_timeout");
-    }
-
-  update_startup_feedback (screen);
-}
-
-static void
-remove_sequence (MetaScreen        *screen,
-                 SnStartupSequence *sequence)
-{
-  meta_topic (META_DEBUG_STARTUP,
-              "Removing sequence %s\n",
-              sn_startup_sequence_get_id (sequence));
-
-  screen->startup_sequences = g_slist_remove (screen->startup_sequences,
-                                              sequence);
-
-  if (screen->startup_sequences == NULL &&
-      screen->startup_sequence_timeout != 0)
-    {
-      g_source_remove (screen->startup_sequence_timeout);
-      screen->startup_sequence_timeout = 0;
-    }
-
-  update_startup_feedback (screen);
-
-  sn_startup_sequence_unref (sequence);
-}
-
-typedef struct
-{
-  GSList *list;
-  GTimeVal now;
-} CollectTimedOutData;
-
-/* This should be fairly long, as it should never be required unless
- * apps or .desktop files are buggy, and it's confusing if
- * OpenOffice or whatever seems to stop launching - people
- * might decide they need to launch it again.
- */
-#define STARTUP_TIMEOUT 15000
-
-static void
-collect_timed_out_foreach (void *element,
-                           void *data)
-{
-  CollectTimedOutData *ctod = data;
-  SnStartupSequence *sequence = element;
-  long tv_sec, tv_usec;
-  double elapsed;
-
-  sn_startup_sequence_get_last_active_time (sequence, &tv_sec, &tv_usec);
-
-  elapsed =
-    ((((double)ctod->now.tv_sec - tv_sec) * G_USEC_PER_SEC +
-      (ctod->now.tv_usec - tv_usec))) / 1000.0;
-
-  meta_topic (META_DEBUG_STARTUP,
-              "Sequence used %g seconds vs. %g max: %s\n",
-              elapsed, (double) STARTUP_TIMEOUT,
-              sn_startup_sequence_get_id (sequence));
-
-  if (elapsed > STARTUP_TIMEOUT)
-    ctod->list = g_slist_prepend (ctod->list, sequence);
-}
-
-static gboolean
-startup_sequence_timeout (void *data)
-{
-  MetaScreen *screen = data;
-  CollectTimedOutData ctod;
-  GSList *l;
-
-  ctod.list = NULL;
-  g_get_current_time (&ctod.now);
-  g_slist_foreach (screen->startup_sequences,
-                   collect_timed_out_foreach,
-                   &ctod);
-
-  for (l = ctod.list; l != NULL; l = l->next)
-    {
-      SnStartupSequence *sequence = l->data;
-
-      meta_topic (META_DEBUG_STARTUP,
-                  "Timed out sequence %s\n",
-                  sn_startup_sequence_get_id (sequence));
-
-      sn_startup_sequence_complete (sequence);
-    }
-
-  g_slist_free (ctod.list);
-
-  if (screen->startup_sequences != NULL)
-    {
-      return TRUE;
-    }
-  else
-    {
-      /* remove */
-      screen->startup_sequence_timeout = 0;
-      return FALSE;
-    }
-}
-
-static void
-meta_screen_sn_event (SnMonitorEvent *event,
-                      void           *user_data)
-{
-  MetaScreen *screen;
-  SnStartupSequence *sequence;
-
-  screen = user_data;
-
-  sequence = sn_monitor_event_get_startup_sequence (event);
-
-  sn_startup_sequence_ref (sequence);
-
-  switch (sn_monitor_event_get_type (event))
-    {
-    case SN_MONITOR_EVENT_INITIATED:
-      {
-        const char *wmclass;
-
-        wmclass = sn_startup_sequence_get_wmclass (sequence);
-
-        meta_topic (META_DEBUG_STARTUP,
-                    "Received startup initiated for %s wmclass %s\n",
-                    sn_startup_sequence_get_id (sequence),
-                    wmclass ? wmclass : "(unset)");
-        add_sequence (screen, sequence);
-      }
-      break;
-
-    case SN_MONITOR_EVENT_COMPLETED:
-      {
-        meta_topic (META_DEBUG_STARTUP,
-                    "Received startup completed for %s\n",
-                    sn_startup_sequence_get_id (sequence));
-        remove_sequence (screen,
-                         sn_monitor_event_get_startup_sequence (event));
-      }
-      break;
-
-    case SN_MONITOR_EVENT_CHANGED:
-      meta_topic (META_DEBUG_STARTUP,
-                  "Received startup changed for %s\n",
-                  sn_startup_sequence_get_id (sequence));
-      break;
-
-    case SN_MONITOR_EVENT_CANCELED:
-      meta_topic (META_DEBUG_STARTUP,
-                  "Received startup canceled for %s\n",
-                  sn_startup_sequence_get_id (sequence));
-      break;
-    }
-
-  g_signal_emit (G_OBJECT (screen), screen_signals[STARTUP_SEQUENCE_CHANGED], 0, sequence);
-
-  sn_startup_sequence_unref (sequence);
-}
-
 /**
  * meta_screen_get_startup_sequences: (skip)
  * @screen:
@@ -2751,7 +2812,6 @@ meta_screen_get_startup_sequences (MetaScreen *screen)
 {
   return screen->startup_sequences;
 }
-#endif
 
 /* Sets the initial_timestamp and initial_workspace properties
  * of a window according to information given us by the
@@ -3174,3 +3234,45 @@ meta_screen_handle_xevent (MetaScreen *screen,
 
   return FALSE;
 }
+
+void          
+meta_screen_enter_corner (MetaScreen *screen, MetaScreenCorner corner)
+{
+  XUnmapWindow (screen->display->xdisplay, screen->corner_windows[corner]);
+  g_signal_emit (screen, screen_signals[CORNER_ENTERED], 0, corner);
+}
+
+void          
+meta_screen_leave_corner (MetaScreen *screen, MetaScreenCorner corner)
+{
+  XMapWindow (screen->display->xdisplay, screen->corner_windows[corner]);
+  g_signal_emit (screen, screen_signals[CORNER_LEAVED], 0, corner);
+}
+
+void
+meta_screen_enable_corner (MetaScreen *screen, MetaScreenCorner corner, gboolean val)
+{
+  if (screen->corner_enabled[corner] == val)
+    return;
+
+  screen->corner_enabled[corner] = val;
+  if (val)
+    XMapWindow (screen->display->xdisplay, screen->corner_windows[corner]);
+  else
+    XUnmapWindow (screen->display->xdisplay, screen->corner_windows[corner]);
+}
+
+void          
+meta_screen_enable_corner_actions (MetaScreen *screen, gboolean enabled)
+{
+  if (screen->corner_actions_enabled != enabled) 
+    {
+      screen->corner_actions_enabled = enabled; 
+      int i;
+      for (i = 0; i < 4; i++)
+        {
+          meta_screen_enable_corner (screen, i, enabled);
+        }
+    }
+}
+

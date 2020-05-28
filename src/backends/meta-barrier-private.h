@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -25,6 +25,8 @@
 
 #ifndef META_BARRIER_PRIVATE_H
 #define META_BARRIER_PRIVATE_H
+
+#include "core/meta-border.h"
 
 G_BEGIN_DECLS
 
@@ -67,14 +69,7 @@ G_END_DECLS
 struct _MetaBarrierPrivate
 {
   MetaDisplay *display;
-
-  int x1;
-  int y1;
-  int x2;
-  int y2;
-
-  MetaBarrierDirection directions;
-
+  MetaBorder border;
   MetaBarrierImpl *impl;
 };
 

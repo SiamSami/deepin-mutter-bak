@@ -96,6 +96,8 @@ construct_tile_monitor (MetaMonitorManager *manager,
         return;
     }
 
+  meta_verbose ("%s: build tiling monitor\n", __func__);
+
   /* didn't find it */
   info.number = monitor_infos->len;
   info.tile_group_id = tile_group_id;
@@ -178,7 +180,7 @@ make_logical_config (MetaMonitorManager *manager)
   unsigned int i, j;
 
   monitor_infos = g_array_sized_new (FALSE, TRUE, sizeof (MetaMonitorInfo),
-                                     manager->n_outputs);
+                                     manager->n_crtcs);
 
   /* Walk the list of MetaCRTCs, and build a MetaMonitorInfo
      for each of them, unless they reference a rectangle that
@@ -283,9 +285,12 @@ make_logical_config (MetaMonitorManager *manager)
   manager->n_monitor_infos = monitor_infos->len;
   manager->monitor_infos = (void*)g_array_free (monitor_infos, FALSE);
 
+  // disable it for deepin 
+#if 0
   if (manager_class->add_monitor)
     for (i = 0; i < manager->n_monitor_infos; i++)
       manager_class->add_monitor (manager, &manager->monitor_infos[i]);
+#endif
 }
 
 static void
@@ -327,6 +332,8 @@ meta_monitor_manager_constructed (GObject *object)
 
   meta_monitor_manager_read_current_config (manager);
 
+  // disable it for deepin 
+#if 0
   if (!meta_monitor_config_apply_stored (manager->config, manager))
     meta_monitor_config_make_default (manager->config, manager);
 
@@ -339,11 +346,29 @@ meta_monitor_manager_constructed (GObject *object)
   */
   if (META_IS_MONITOR_MANAGER_XRANDR (manager))
     meta_monitor_manager_read_current_config (manager);
+#endif
 
   make_logical_config (manager);
   initialize_dbus_interface (manager);
 
   manager->in_init = FALSE;
+}
+
+void
+meta_monitor_manager_clear_output (MetaOutput *output)
+{
+  g_free (output->name);
+  g_free (output->vendor);
+  g_free (output->product);
+  g_free (output->serial);
+  g_free (output->modes);
+  g_free (output->possible_crtcs);
+  g_free (output->possible_clones);
+
+  if (output->driver_notify)
+    output->driver_notify (output);
+
+  memset (output, 0, sizeof (*output));
 }
 
 static void
@@ -353,20 +378,20 @@ meta_monitor_manager_free_output_array (MetaOutput *old_outputs,
   int i;
 
   for (i = 0; i < n_old_outputs; i++)
-    {
-      g_free (old_outputs[i].name);
-      g_free (old_outputs[i].vendor);
-      g_free (old_outputs[i].product);
-      g_free (old_outputs[i].serial);
-      g_free (old_outputs[i].modes);
-      g_free (old_outputs[i].possible_crtcs);
-      g_free (old_outputs[i].possible_clones);
-
-      if (old_outputs[i].driver_notify)
-        old_outputs[i].driver_notify (&old_outputs[i]);
-    }
+    meta_monitor_manager_clear_output (&old_outputs[i]);
 
   g_free (old_outputs);
+}
+
+void
+meta_monitor_manager_clear_mode (MetaMonitorMode *mode)
+{
+  g_free (mode->name);
+
+  if (mode->driver_notify)
+    mode->driver_notify (mode);
+
+  memset (mode, 0, sizeof (*mode));
 }
 
 static void
@@ -376,14 +401,18 @@ meta_monitor_manager_free_mode_array (MetaMonitorMode *old_modes,
   int i;
 
   for (i = 0; i < n_old_modes; i++)
-    {
-      g_free (old_modes[i].name);
-
-      if (old_modes[i].driver_notify)
-        old_modes[i].driver_notify (&old_modes[i]);
-    }
+    meta_monitor_manager_clear_mode (&old_modes[i]);
 
   g_free (old_modes);
+}
+
+void
+meta_monitor_manager_clear_crtc (MetaCRTC *crtc)
+{
+  if (crtc->driver_notify)
+    crtc->driver_notify (crtc);
+
+  memset (crtc, 0, sizeof (*crtc));
 }
 
 static void
@@ -393,10 +422,7 @@ meta_monitor_manager_free_crtc_array (MetaCRTC *old_crtcs,
   int i;
 
   for (i = 0; i < n_old_crtcs; i++)
-    {
-      if (old_crtcs[i].driver_notify)
-        old_crtcs[i].driver_notify (&old_crtcs[i]);
-    }
+    meta_monitor_manager_clear_crtc (&old_crtcs[i]);
 
   g_free (old_crtcs);
 }
@@ -493,14 +519,8 @@ make_display_name (MetaMonitorManager *manager,
   g_autofree char *inches = NULL;
   g_autofree char *vendor_name = NULL;
 
-  switch (output->connector_type)
-    {
-    case META_CONNECTOR_TYPE_LVDS:
-    case META_CONNECTOR_TYPE_eDP:
+  if (meta_output_is_laptop (output))
       return g_strdup (_("Built-in display"));
-    default:
-      break;
-    }
 
   if (output->width_mm > 0 && output->height_mm > 0)
     {
@@ -1376,6 +1396,9 @@ meta_monitor_manager_rebuild_derived (MetaMonitorManager *manager)
   if (manager->in_init)
     return;
 
+  if (manager->n_outputs == 0) 
+    return;
+
   make_logical_config (manager);
 
   if (manager_class->delete_monitor)
@@ -1446,6 +1469,21 @@ meta_output_parse_edid (MetaOutput *meta_output,
     meta_output->serial = g_strdup ("unknown");
 }
 
+gboolean
+meta_output_is_laptop (MetaOutput *output)
+{
+  /* FIXME: extend with better heuristics */
+  switch (output->connector_type)
+    {
+    case META_CONNECTOR_TYPE_eDP:
+    case META_CONNECTOR_TYPE_LVDS:
+    case META_CONNECTOR_TYPE_DSI:
+      return TRUE;
+    default:
+      return FALSE;
+    }
+}
+
 void
 meta_monitor_manager_on_hotplug (MetaMonitorManager *manager)
 {
@@ -1455,11 +1493,13 @@ meta_monitor_manager_on_hotplug (MetaMonitorManager *manager)
    * applying our stored configuration, because it's likely the user just resizing
    * the window.
    */
+#if !defined(__mips__)
   if (!meta_monitor_manager_has_hotplug_mode_update (manager))
     {
       if (meta_monitor_config_apply_stored (manager->config, manager))
         applied_config = TRUE;
     }
+#endif
 
   /* If we haven't applied any configuration, apply the default configuration. */
   if (!applied_config)
@@ -1571,4 +1611,12 @@ meta_monitor_manager_get_monitor_at_point (MetaMonitorManager *manager,
     }
 
   return -1;
+}
+
+gboolean
+meta_monitor_manager_get_is_builtin_display_on (MetaMonitorManager *manager)
+{
+  g_return_val_if_fail (META_IS_MONITOR_MANAGER (manager), FALSE);
+
+  return meta_monitor_config_get_is_builtin_display_on (manager->config);
 }

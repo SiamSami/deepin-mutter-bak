@@ -204,6 +204,7 @@ static void
 update_touchpad_left_handed (MetaInputSettings  *input_settings,
                              ClutterInputDevice *device)
 {
+#if 0
   MetaInputSettingsClass *input_settings_class;
   GDesktopTouchpadHandedness handedness;
   MetaInputSettingsPrivate *priv;
@@ -244,12 +245,14 @@ update_touchpad_left_handed (MetaInputSettings  *input_settings,
                                  input_settings_class->set_left_handed,
                                  enabled);
     }
+#endif
 }
 
 static void
 update_mouse_left_handed (MetaInputSettings  *input_settings,
                           ClutterInputDevice *device)
 {
+#if 0
   MetaInputSettingsClass *input_settings_class;
   MetaInputSettingsPrivate *priv;
   gboolean enabled;
@@ -283,6 +286,7 @@ update_mouse_left_handed (MetaInputSettings  *input_settings,
       if (touchpad_handedness == G_DESKTOP_TOUCHPAD_HANDEDNESS_MOUSE)
         update_touchpad_left_handed (input_settings, NULL);
     }
+#endif
 }
 
 static GSettings *
@@ -395,11 +399,11 @@ update_touchpad_tap_enabled (MetaInputSettings  *input_settings,
 }
 
 static void
-update_touchpad_scroll_method (MetaInputSettings *input_settings,
-                               ClutterInputDevice *device)
+update_touchpad_edge_scroll (MetaInputSettings *input_settings,
+                             ClutterInputDevice *device)
 {
   MetaInputSettingsClass *input_settings_class;
-  GDesktopTouchpadScrollMethod method;
+  gboolean edge_scroll_enabled;
   MetaInputSettingsPrivate *priv;
 
   if (device &&
@@ -408,19 +412,19 @@ update_touchpad_scroll_method (MetaInputSettings *input_settings,
 
   priv = meta_input_settings_get_instance_private (input_settings);
   input_settings_class = META_INPUT_SETTINGS_GET_CLASS (input_settings);
-  method = g_settings_get_enum (priv->touchpad_settings, "scroll-method");
+  edge_scroll_enabled = g_settings_get_boolean (priv->touchpad_settings, "edge-scrolling-enabled");
 
   if (device)
     {
-      settings_device_set_uint_setting (input_settings, device,
-                                        input_settings_class->set_scroll_method,
-                                        method);
+      settings_device_set_bool_setting (input_settings, device,
+                                        input_settings_class->set_edge_scroll,
+                                        edge_scroll_enabled);
     }
   else
     {
-      settings_set_uint_setting (input_settings, CLUTTER_TOUCHPAD_DEVICE,
-                                 (ConfigUintFunc) input_settings_class->set_scroll_method,
-                                 method);
+      settings_set_bool_setting (input_settings, CLUTTER_TOUCHPAD_DEVICE,
+                                 (ConfigBoolFunc) input_settings_class->set_edge_scroll,
+                                 edge_scroll_enabled);
     }
 }
 
@@ -429,7 +433,7 @@ update_touchpad_click_method (MetaInputSettings *input_settings,
                               ClutterInputDevice *device)
 {
   MetaInputSettingsClass *input_settings_class;
-  GDesktopTouchpadScrollMethod method;
+  GDesktopTouchpadClickMethod method;
   MetaInputSettingsPrivate *priv;
 
   if (device &&
@@ -609,9 +613,13 @@ update_device_display (MetaInputSettings  *input_settings,
   input_settings_class = META_INPUT_SETTINGS_GET_CLASS (input_settings);
   output = meta_input_settings_find_output (input_settings, settings, device);
 
-  if (output)
-    meta_monitor_manager_get_monitor_matrix (priv->monitor_manager,
-                                             output, matrix);
+  // 未找到output设备时不更新输入设备的matrix。因为此设备的matrix可能被其它应用更新
+  // 在未找到output时更新matrix会导致其它应用的行为被覆盖（例如在屏幕旋转时更新了触摸屏设备的matrix）
+  if (!output)
+    return;
+
+  meta_monitor_manager_get_monitor_matrix (priv->monitor_manager,
+                                           output, matrix);
 
   input_settings_class->set_matrix (input_settings, device, matrix);
 }
@@ -624,6 +632,7 @@ meta_input_settings_changed_cb (GSettings  *settings,
   MetaInputSettings *input_settings = META_INPUT_SETTINGS (user_data);
   MetaInputSettingsPrivate *priv = meta_input_settings_get_instance_private (input_settings);
 
+#if 0
   if (settings == priv->mouse_settings)
     {
       if (strcmp (key, "left-handed") == 0)
@@ -645,8 +654,8 @@ meta_input_settings_changed_cb (GSettings  *settings,
         update_touchpad_tap_enabled (input_settings, NULL);
       else if (strcmp (key, "send-events") == 0)
         update_touchpad_send_events (input_settings, NULL);
-      else if (strcmp (key, "scroll-method") == 0)
-        update_touchpad_scroll_method (input_settings, NULL);
+      else if (strcmp (key, "edge-scrolling-enabled") == 0)
+        update_touchpad_edge_scroll (input_settings, NULL);
       else if (strcmp (key, "click-method") == 0)
         update_touchpad_click_method (input_settings, NULL);
     }
@@ -662,6 +671,7 @@ meta_input_settings_changed_cb (GSettings  *settings,
           strcmp (key, "delay") == 0)
         update_keyboard_repeat (input_settings);
     }
+#endif
 }
 
 static void
@@ -762,19 +772,20 @@ static void
 apply_device_settings (MetaInputSettings  *input_settings,
                        ClutterInputDevice *device)
 {
+#if 0
   update_mouse_left_handed (input_settings, device);
   update_device_speed (input_settings, device);
   update_device_natural_scroll (input_settings, device);
-
   update_touchpad_left_handed (input_settings, device);
   update_device_speed (input_settings, device);
   update_device_natural_scroll (input_settings, device);
   update_touchpad_tap_enabled (input_settings, device);
   update_touchpad_send_events (input_settings, device);
-  update_touchpad_scroll_method (input_settings, device);
+  update_touchpad_edge_scroll (input_settings, device);
   update_touchpad_click_method (input_settings, device);
 
   update_trackball_scroll_button (input_settings, device);
+#endif
 }
 
 static void
@@ -826,7 +837,9 @@ meta_input_settings_constructed (GObject *object)
   MetaInputSettings *input_settings = META_INPUT_SETTINGS (object);
 
   apply_device_settings (input_settings, NULL);
+#if 0
   update_keyboard_repeat (input_settings);
+#endif
   check_mappable_devices (input_settings);
 }
 

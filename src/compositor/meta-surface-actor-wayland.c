@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -35,6 +35,14 @@
 #include "wayland/meta-window-wayland.h"
 
 #include "compositor/region-utils.h"
+
+enum {
+  PAINTING,
+
+  LAST_SIGNAL
+};
+
+static guint signals[LAST_SIGNAL];
 
 struct _MetaSurfaceActorWaylandPrivate
 {
@@ -128,7 +136,8 @@ meta_surface_actor_wayland_get_subsurface_rect (MetaSurfaceActorWayland *self,
                                                 MetaRectangle           *rect)
 {
   MetaWaylandSurface *surface = meta_surface_actor_wayland_get_surface (self);
-  CoglTexture *texture = surface->buffer->texture;
+  MetaWaylandBuffer *buffer = meta_wayland_surface_get_buffer (surface);
+  CoglTexture *texture = buffer->texture;
   MetaWindow *toplevel_window;
   int monitor_scale;
   float x, y;
@@ -347,11 +356,12 @@ meta_surface_actor_wayland_paint (ClutterActor *actor)
   if (priv->surface)
     {
       MetaWaylandCompositor *compositor = priv->surface->compositor;
-      meta_wayland_surface_update_outputs (priv->surface);
 
       wl_list_insert_list (&compositor->frame_callbacks, &priv->frame_callback_list);
       wl_list_init (&priv->frame_callback_list);
     }
+
+  g_signal_emit (actor, signals[PAINTING], 0);
 
   CLUTTER_ACTOR_CLASS (meta_surface_actor_wayland_parent_class)->paint (actor);
 }
@@ -388,6 +398,13 @@ meta_surface_actor_wayland_class_init (MetaSurfaceActorWaylandClass *klass)
   surface_actor_class->get_window = meta_surface_actor_wayland_get_window;
 
   object_class->dispose = meta_surface_actor_wayland_dispose;
+
+  signals[PAINTING] = g_signal_new ("painting",
+                                    G_TYPE_FROM_CLASS (object_class),
+                                    G_SIGNAL_RUN_LAST,
+                                    0,
+                                    NULL, NULL, NULL,
+                                    G_TYPE_NONE, 0);
 }
 
 static void

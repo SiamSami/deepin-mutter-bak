@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -34,6 +34,7 @@
 #include <meta/meta-idle-monitor.h>
 #include "meta-cursor-renderer.h"
 #include "meta-monitor-manager-private.h"
+#include "backends/meta-pointer-constraint.h"
 
 #define DEFAULT_XKB_RULES_FILE "evdev"
 #define DEFAULT_XKB_MODEL "pc105+inet"
@@ -51,6 +52,8 @@ struct _MetaBackend
 
   GHashTable *device_monitors;
   gint current_device_id;
+
+  MetaPointerConstraint *client_pointer_constraint;
 };
 
 struct _MetaBackendClass
@@ -87,6 +90,13 @@ struct _MetaBackendClass
 
   void (* update_screen_size) (MetaBackend *backend, int width, int height);
   void (* select_stage_events) (MetaBackend *backend);
+
+  gboolean (* get_relative_motion_deltas) (MetaBackend *backend,
+                                           const        ClutterEvent *event,
+                                           double       *dx,
+                                           double       *dy,
+                                           double       *dx_unaccel,
+                                           double       *dy_unaccel);
 };
 
 MetaIdleMonitor * meta_backend_get_idle_monitor (MetaBackend *backend,
@@ -109,5 +119,15 @@ struct xkb_keymap * meta_backend_get_keymap (MetaBackend *backend);
 
 void meta_backend_update_last_device (MetaBackend *backend,
                                       int          device_id);
+
+gboolean meta_backend_get_relative_motion_deltas (MetaBackend *backend,
+                                                  const        ClutterEvent *event,
+                                                  double       *dx,
+                                                  double       *dy,
+                                                  double       *dx_unaccel,
+                                                  double       *dy_unaccel);
+
+void meta_backend_set_client_pointer_constraint (MetaBackend *backend,
+                                                 MetaPointerConstraint *constraint);
 
 #endif /* META_BACKEND_PRIVATE_H */

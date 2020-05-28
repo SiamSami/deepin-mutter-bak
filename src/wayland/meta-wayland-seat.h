@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  */
 
 #ifndef META_WAYLAND_SEAT_H
@@ -60,9 +60,12 @@ void meta_wayland_seat_set_input_focus (MetaWaylandSeat    *seat,
 void meta_wayland_seat_repick (MetaWaylandSeat *seat);
 
 gboolean meta_wayland_seat_get_grab_info (MetaWaylandSeat    *seat,
-					  MetaWaylandSurface *surface,
-					  uint32_t            serial,
-					  gfloat             *x,
-					  gfloat             *y);
+                                          MetaWaylandSurface *surface,
+                                          uint32_t            serial,
+                                          gboolean            require_pressed,
+                                          gfloat             *x,
+                                          gfloat             *y);
+gboolean meta_wayland_seat_can_popup     (MetaWaylandSeat *seat,
+                                          uint32_t         serial);
 
 #endif /* META_WAYLAND_SEAT_H */

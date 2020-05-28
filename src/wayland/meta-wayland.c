@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  */
 
 #include "config.h"
@@ -46,14 +46,6 @@ MetaWaylandCompositor *
 meta_wayland_compositor_get_default (void)
 {
   return &_meta_wayland_compositor;
-}
-
-static guint32
-get_time (void)
-{
-  struct timeval tv;
-  gettimeofday (&tv, NULL);
-  return tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
 typedef struct
@@ -186,7 +178,7 @@ meta_wayland_compositor_paint_finished (MetaWaylandCompositor *compositor)
       MetaWaylandFrameCallback *callback =
         wl_container_of (compositor->frame_callbacks.next, callback, link);
 
-      wl_callback_send_done (callback->resource, get_time ());
+      wl_callback_send_done (callback->resource, g_get_monotonic_time () / 1000);
       wl_resource_destroy (callback->resource);
     }
 }
@@ -336,13 +328,15 @@ meta_wayland_init (void)
   meta_wayland_shell_init (compositor);
   meta_wayland_pointer_gestures_init (compositor);
   meta_wayland_seat_init (compositor);
+  meta_wayland_relative_pointer_init (compositor);
+  meta_wayland_pointer_constraints_init (compositor);
+
+  if (!meta_xwayland_start (&compositor->xwayland_manager, compositor->wayland_display))
+    g_error ("Failed to start X Wayland");
 
   compositor->display_name = wl_display_add_socket_auto (compositor->wayland_display);
   if (compositor->display_name == NULL)
     g_error ("Failed to create socket");
-
-  if (!meta_xwayland_start (&compositor->xwayland_manager, compositor->wayland_display))
-    g_error ("Failed to start X Wayland");
 
   set_gnome_env ("DISPLAY", meta_wayland_get_xwayland_display_name (compositor));
   set_gnome_env ("WAYLAND_DISPLAY", meta_wayland_get_wayland_display_name (compositor));

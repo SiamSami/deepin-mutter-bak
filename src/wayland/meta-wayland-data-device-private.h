@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jonas Ådahl <jadahl@gmail.com>
@@ -30,5 +30,11 @@ G_DECLARE_FINAL_TYPE (MetaWaylandDataSourceWayland,
                       meta_wayland_data_source_wayland,
                       META, WAYLAND_DATA_SOURCE_WAYLAND,
                       MetaWaylandDataSource);
+
+#define META_TYPE_WAYLAND_DATA_SOURCE_PRIMARY (meta_wayland_data_source_primary_get_type ())
+G_DECLARE_FINAL_TYPE (MetaWaylandDataSourcePrimary,
+                      meta_wayland_data_source_primary,
+                      META, WAYLAND_DATA_SOURCE_PRIMARY,
+                      MetaWaylandDataSourceWayland);
 
 #endif /* META_WAYLAND_DATA_DEVICE_PRIVATE_H */

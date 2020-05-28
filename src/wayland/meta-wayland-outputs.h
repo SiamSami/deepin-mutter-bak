@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -41,10 +41,11 @@ struct _MetaWaylandOutput
 {
   GObject                   parent;
 
-  MetaMonitorInfo          *monitor_info;
   struct wl_global         *global;
-  int                       x, y;
+  MetaMonitorInfo          *monitor_info;
   enum wl_output_transform  transform;
+  guint                     mode_flags;
+  gint                      scale;
 
   GList                    *resources;
 };

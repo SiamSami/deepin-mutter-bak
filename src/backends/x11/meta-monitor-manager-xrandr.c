@@ -331,6 +331,7 @@ static void
 output_get_backlight_limits_xrandr (MetaMonitorManagerXrandr *manager_xrandr,
                                     MetaOutput               *output)
 {
+#if !defined(__mips__)
   Atom atom;
   xcb_connection_t *xcb_conn;
   g_autofree xcb_randr_query_output_property_reply_t *reply;
@@ -357,6 +358,7 @@ output_get_backlight_limits_xrandr (MetaMonitorManagerXrandr *manager_xrandr,
   int32_t *values = xcb_randr_query_output_property_valid_values (reply);
   output->backlight_min = values[0];
   output->backlight_max = values[1];
+#endif
 }
 
 static int
@@ -416,12 +418,6 @@ read_output_edid (MetaMonitorManagerXrandr *manager_xrandr,
   if (!result)
     {
       edid_atom = XInternAtom (manager_xrandr->xdisplay, "EDID_DATA", FALSE);
-      result = get_edid_property (manager_xrandr->xdisplay, winsys_id, edid_atom, &len);
-    }
-
-  if (!result)
-    {
-      edid_atom = XInternAtom (manager_xrandr->xdisplay, "XFree86_DDC_EDID1_RAWDATA", FALSE);
       result = get_edid_property (manager_xrandr->xdisplay, winsys_id, edid_atom, &len);
     }
 
@@ -637,6 +633,76 @@ output_get_connector_type (MetaMonitorManagerXrandr *manager_xrandr,
   return META_CONNECTOR_TYPE_Unknown;
 }
 
+static void
+output_get_modes (MetaMonitorManager *manager,
+                  MetaOutput         *meta_output,
+                  XRROutputInfo      *output)
+{
+  guint j, k;
+  guint n_actual_modes;
+
+  meta_output->modes = g_new0 (MetaMonitorMode *, output->nmode);
+
+  n_actual_modes = 0;
+  for (j = 0; j < (guint)output->nmode; j++)
+    {
+      for (k = 0; k < manager->n_modes; k++)
+        {
+          if (output->modes[j] == (XID)manager->modes[k].mode_id)
+            {
+              meta_output->modes[n_actual_modes] = &manager->modes[k];
+              n_actual_modes += 1;
+              break;
+            }
+        }
+    }
+  meta_output->n_modes = n_actual_modes;
+  if (n_actual_modes > 0)
+    meta_output->preferred_mode = meta_output->modes[0];
+}
+
+static void
+output_get_crtcs (MetaMonitorManager *manager,
+                  MetaOutput         *meta_output,
+                  XRROutputInfo      *output)
+{
+  guint j, k;
+  guint n_actual_crtcs;
+
+  meta_output->possible_crtcs = g_new0 (MetaCRTC *, output->ncrtc);
+
+  n_actual_crtcs = 0;
+  for (j = 0; j < (unsigned)output->ncrtc; j++)
+    {
+      for (k = 0; k < manager->n_crtcs; k++)
+        {
+          /* for unknown reason, current crtc may has no valid mode.
+           * if this happens, we leave this output as turned off
+           **/
+          if (manager->crtcs[k].current_mode == NULL) 
+            continue;
+
+          if ((XID)manager->crtcs[k].crtc_id == output->crtcs[j])
+            {
+              meta_output->possible_crtcs[n_actual_crtcs] = &manager->crtcs[k];
+              n_actual_crtcs += 1;
+              break;
+            }
+        }
+    }
+  meta_output->n_possible_crtcs = n_actual_crtcs;
+
+  meta_output->crtc = NULL;
+  for (j = 0; j < manager->n_crtcs; j++)
+    {
+      if ((XID)manager->crtcs[j].crtc_id == output->crtc)
+        {
+          meta_output->crtc = &manager->crtcs[j];
+          break;
+        }
+    }
+}
+
 static char *
 get_xmode_name (XRRModeInfo *xmode)
 {
@@ -663,7 +729,11 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
     XRRFreeScreenResources (manager_xrandr->resources);
   manager_xrandr->resources = NULL;
 
+#if defined(__mips__)
+	dpms_capable = 0;
+#else
   dpms_capable = DPMSCapable (manager_xrandr->xdisplay);
+#endif
 
   if (dpms_capable &&
       DPMSInfo (manager_xrandr->xdisplay, &dpms_state, &dpms_enabled) &&
@@ -705,8 +775,13 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
   manager->screen_width = WidthOfScreen (screen);
   manager->screen_height = HeightOfScreen (screen);
 
+#if defined(__mips__)
+  resources = XRRGetScreenResources (manager_xrandr->xdisplay,
+			    DefaultRootWindow (manager_xrandr->xdisplay));
+#else
   resources = XRRGetScreenResourcesCurrent (manager_xrandr->xdisplay,
-					    DefaultRootWindow (manager_xrandr->xdisplay));
+			    DefaultRootWindow (manager_xrandr->xdisplay));
+#endif
   if (!resources)
     return;
 
@@ -773,6 +848,8 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
       MetaOutput *meta_output;
 
       output = XRRGetOutputInfo (manager_xrandr->xdisplay, resources, resources->outputs[i]);
+      if (!output)
+        continue;
 
       meta_output = &manager->outputs[n_actual_outputs];
 
@@ -782,10 +859,11 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
 
 	  meta_output->winsys_id = resources->outputs[i];
 	  meta_output->name = g_strdup (output->name);
-
+#if !defined(__mips__)
           edid = read_output_edid (manager_xrandr, meta_output->winsys_id);
           meta_output_parse_edid (meta_output, edid);
           g_bytes_unref (edid);
+#endif
 
 	  meta_output->width_mm = output->mm_width;
 	  meta_output->height_mm = output->mm_height;
@@ -796,44 +874,8 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
           meta_output->connector_type = output_get_connector_type (manager_xrandr, meta_output);
 
 	  output_get_tile_info (manager_xrandr, meta_output);
-	  meta_output->n_modes = output->nmode;
-	  meta_output->modes = g_new0 (MetaMonitorMode *, meta_output->n_modes);
-	  for (j = 0; j < meta_output->n_modes; j++)
-	    {
-	      for (k = 0; k < manager->n_modes; k++)
-		{
-		  if (output->modes[j] == (XID)manager->modes[k].mode_id)
-		    {
-		      meta_output->modes[j] = &manager->modes[k];
-		      break;
-		    }
-		}
-	    }
-	  meta_output->preferred_mode = meta_output->modes[0];
-
-	  meta_output->n_possible_crtcs = output->ncrtc;
-	  meta_output->possible_crtcs = g_new0 (MetaCRTC *, meta_output->n_possible_crtcs);
-	  for (j = 0; j < (unsigned)output->ncrtc; j++)
-	    {
-	      for (k = 0; k < manager->n_crtcs; k++)
-		{
-		  if ((XID)manager->crtcs[k].crtc_id == output->crtcs[j])
-		    {
-		      meta_output->possible_crtcs[j] = &manager->crtcs[k];
-		      break;
-		    }
-		}
-	    }
-
-	  meta_output->crtc = NULL;
-	  for (j = 0; j < manager->n_crtcs; j++)
-	    {
-	      if ((XID)manager->crtcs[j].crtc_id == output->crtc)
-		{
-		  meta_output->crtc = &manager->crtcs[j];
-		  break;
-		}
-	    }
+	  output_get_modes (manager, meta_output, output);
+          output_get_crtcs (manager, meta_output, output);
 
 	  meta_output->n_possible_clones = output->nclone;
 	  meta_output->possible_clones = g_new0 (MetaOutput *, meta_output->n_possible_clones);
@@ -847,9 +889,11 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
 	    }
 
 	  meta_output->is_primary = ((XID)meta_output->winsys_id == primary_output);
+#if !defined(__mips__)
 	  meta_output->is_presentation = output_get_presentation_xrandr (manager_xrandr, meta_output);
 	  meta_output->is_underscanning = output_get_underscanning_xrandr (manager_xrandr, meta_output);
           meta_output->supports_underscanning = output_get_supports_underscanning_xrandr (manager_xrandr, meta_output);
+#endif
 	  output_get_backlight_limits_xrandr (manager_xrandr, meta_output);
 
 	  if (!(meta_output->backlight_min == 0 && meta_output->backlight_max == 0))
@@ -857,7 +901,10 @@ meta_monitor_manager_xrandr_read_current (MetaMonitorManager *manager)
 	  else
 	    meta_output->backlight = -1;
 
-	  n_actual_outputs++;
+          if (meta_output->n_modes == 0 || meta_output->n_possible_crtcs == 0)
+            meta_monitor_manager_clear_output (meta_output);
+          else
+            n_actual_outputs++;
 	}
 
       XRRFreeOutputInfo (output);
@@ -960,15 +1007,22 @@ output_set_presentation_xrandr (MetaMonitorManagerXrandr *manager_xrandr,
                                 gboolean                  presentation)
 {
   Atom atom;
+  xcb_void_cookie_t cookie;
+  xcb_generic_error_t* error;
+
   int value = presentation;
 
   atom = XInternAtom (manager_xrandr->xdisplay, "_MUTTER_PRESENTATION_OUTPUT", False);
 
-  xcb_randr_change_output_property (XGetXCBConnection (manager_xrandr->xdisplay),
+  cookie = xcb_randr_change_output_property_checked (XGetXCBConnection (manager_xrandr->xdisplay),
                                     (XID)output->winsys_id,
                                     atom, XCB_ATOM_CARDINAL, 32,
                                     XCB_PROP_MODE_REPLACE,
                                     1, &value);
+  error = xcb_request_check (XGetXCBConnection(manager_xrandr->xdisplay), cookie);
+  if (error) {
+      meta_warning ("%s: error code %d\n", __func__, error->error_code);
+  }
 }
 
 static void
@@ -977,6 +1031,8 @@ output_set_underscanning_xrandr (MetaMonitorManagerXrandr *manager_xrandr,
                                  gboolean                  underscanning)
 {
   Atom prop, valueatom;
+  xcb_void_cookie_t cookie;
+  xcb_generic_error_t* error;
   const char *value;
 
   prop = XInternAtom (manager_xrandr->xdisplay, "underscan", False);
@@ -984,11 +1040,16 @@ output_set_underscanning_xrandr (MetaMonitorManagerXrandr *manager_xrandr,
   value = underscanning ? "on" : "off";
   valueatom = XInternAtom (manager_xrandr->xdisplay, value, False);
 
-  xcb_randr_change_output_property (XGetXCBConnection (manager_xrandr->xdisplay),
+  cookie = xcb_randr_change_output_property_checked (XGetXCBConnection (manager_xrandr->xdisplay),
                                     (XID)output->winsys_id,
                                     prop, XCB_ATOM_ATOM, 32,
                                     XCB_PROP_MODE_REPLACE,
                                     1, &valueatom);
+  error = xcb_request_check (XGetXCBConnection(manager_xrandr->xdisplay), cookie);
+  if (error) {
+      meta_warning ("%s: error code %d\n", __func__, error->error_code);
+      return;
+  }
 
   /* Configure the border at the same time. Currently, we use a
    * 5% of the width/height of the mode. In the future, we should
@@ -1000,20 +1061,29 @@ output_set_underscanning_xrandr (MetaMonitorManagerXrandr *manager_xrandr,
       prop = XInternAtom (manager_xrandr->xdisplay, "underscan hborder", False);
       border_value = output->crtc->current_mode->width * 0.05;
 
-      xcb_randr_change_output_property (XGetXCBConnection (manager_xrandr->xdisplay),
+      cookie = xcb_randr_change_output_property_checked (XGetXCBConnection (manager_xrandr->xdisplay),
                                         (XID)output->winsys_id,
                                         prop, XCB_ATOM_INTEGER, 32,
                                         XCB_PROP_MODE_REPLACE,
                                         1, &border_value);
+
+      error = xcb_request_check (XGetXCBConnection(manager_xrandr->xdisplay), cookie);
+      if (error) {
+          meta_warning ("%s: error code %d\n", __func__, error->error_code);
+      }
 
       prop = XInternAtom (manager_xrandr->xdisplay, "underscan vborder", False);
       border_value = output->crtc->current_mode->height * 0.05;
 
-      xcb_randr_change_output_property (XGetXCBConnection (manager_xrandr->xdisplay),
+      cookie = xcb_randr_change_output_property_checked (XGetXCBConnection (manager_xrandr->xdisplay),
                                         (XID)output->winsys_id,
                                         prop, XCB_ATOM_INTEGER, 32,
                                         XCB_PROP_MODE_REPLACE,
                                         1, &border_value);
+      error = xcb_request_check (XGetXCBConnection(manager_xrandr->xdisplay), cookie);
+      if (error) {
+          meta_warning ("%s: error code %d\n", __func__, error->error_code);
+      }
     }
 }
 
@@ -1197,13 +1267,13 @@ meta_monitor_manager_xrandr_apply_configuration (MetaMonitorManager *manager,
       MetaOutputInfo *output_info = outputs[i];
       MetaOutput *output = output_info->output;
 
+#if !defined(__alpha__) && !defined(__sw_64__) && !defined(__mips__)
       if (output_info->is_primary)
         {
           XRRSetOutputPrimary (manager_xrandr->xdisplay,
                                DefaultRootWindow (manager_xrandr->xdisplay),
                                (XID)output_info->output->winsys_id);
         }
-
       output_set_presentation_xrandr (manager_xrandr,
                                       output_info->output,
                                       output_info->is_presentation);
@@ -1213,6 +1283,7 @@ meta_monitor_manager_xrandr_apply_configuration (MetaMonitorManager *manager,
                                          output_info->output,
                                          output_info->is_underscanning);
 
+#endif
       output->is_primary = output_info->is_primary;
       output->is_presentation = output_info->is_presentation;
       output->is_underscanning = output_info->is_underscanning;
@@ -1242,22 +1313,31 @@ meta_monitor_manager_xrandr_change_backlight (MetaMonitorManager *manager,
 					      MetaOutput         *output,
 					      gint                value)
 {
+#if !defined(__mips__)
   MetaMonitorManagerXrandr *manager_xrandr = META_MONITOR_MANAGER_XRANDR (manager);
   Atom atom;
+  xcb_void_cookie_t cookie;
+  xcb_generic_error_t* error;
   int hw_value;
 
   hw_value = round ((double)value / 100.0 * output->backlight_max + output->backlight_min);
 
   atom = XInternAtom (manager_xrandr->xdisplay, "Backlight", False);
 
-  xcb_randr_change_output_property (XGetXCBConnection (manager_xrandr->xdisplay),
+  cookie = xcb_randr_change_output_property_checked (XGetXCBConnection (manager_xrandr->xdisplay),
                                     (XID)output->winsys_id,
                                     atom, XCB_ATOM_INTEGER, 32,
                                     XCB_PROP_MODE_REPLACE,
                                     1, &hw_value);
+  error = xcb_request_check (XGetXCBConnection(manager_xrandr->xdisplay), cookie);
+  if (error) {
+      meta_warning ("%s: error code %d\n", __func__, error->error_code);
+      return;
+  }
 
   /* We're not selecting for property notifies, so update the value immediately */
   output->backlight = normalize_backlight (output, hw_value);
+#endif
 }
 
 static void
@@ -1405,8 +1485,8 @@ meta_monitor_manager_xrandr_init (MetaMonitorManagerXrandr *manager_xrandr)
       XRRSelectInput (manager_xrandr->xdisplay,
 		      DefaultRootWindow (manager_xrandr->xdisplay),
 		      RRScreenChangeNotifyMask
-		      | RRCrtcChangeNotifyMask
-		      | RROutputPropertyNotifyMask);
+              | RRCrtcChangeNotifyMask
+              | RROutputPropertyNotifyMask);
 
       manager_xrandr->has_randr15 = FALSE;
       XRRQueryVersion (manager_xrandr->xdisplay, &major_version,
@@ -1448,27 +1528,41 @@ meta_monitor_manager_xrandr_class_init (MetaMonitorManagerXrandrClass *klass)
   manager_class->change_backlight = meta_monitor_manager_xrandr_change_backlight;
   manager_class->get_crtc_gamma = meta_monitor_manager_xrandr_get_crtc_gamma;
   manager_class->set_crtc_gamma = meta_monitor_manager_xrandr_set_crtc_gamma;
+  // disable them since we delegate job to dde-daemon
+#if 0
 #ifdef HAVE_XRANDR15
   manager_class->add_monitor = meta_monitor_manager_xrandr_add_monitor;
   manager_class->delete_monitor = meta_monitor_manager_xrandr_delete_monitor;
 #endif
+#endif
 }
 
-gboolean
-meta_monitor_manager_xrandr_handle_xevent (MetaMonitorManagerXrandr *manager_xrandr,
-					   XEvent                   *event)
+static void
+idle_check_randr_configuration(MetaMonitorManagerXrandr* manager_xrandr)
 {
   MetaMonitorManager *manager = META_MONITOR_MANAGER (manager_xrandr);
   gboolean hotplug;
 
-  if ((event->type - manager_xrandr->rr_event_base) != RRScreenChangeNotify)
-    return FALSE;
+  // do check forever if there is no output at all
+  while (TRUE) {
+    meta_monitor_manager_read_current_config (manager);
+    meta_verbose ("xrandr read_current success\n");
+    if (manager->n_outputs == 0) {
+      meta_verbose ("found 0 outputs from current config, recheck after 1 second\n");
+      g_usleep(1000000);
+    } else { 
+      break;
+    }
+  }
+  if (manager->n_outputs == 0) {
+	meta_verbose ("still no ouputs\n");
+    hotplug = 1;
+  } else {
+    hotplug = manager_xrandr->resources->timestamp < manager_xrandr->resources->configTimestamp;
+    meta_verbose ("monitor hotplug = %d, but force to 0\n", hotplug);
+    hotplug = 0;
+  }
 
-  XRRUpdateConfiguration (event);
-
-  meta_monitor_manager_read_current_config (manager);
-
-  hotplug = manager_xrandr->resources->timestamp < manager_xrandr->resources->configTimestamp;
   if (hotplug)
     {
       /* This is a hotplug event, so go ahead and build a new configuration. */
@@ -1479,6 +1573,50 @@ meta_monitor_manager_xrandr_handle_xevent (MetaMonitorManagerXrandr *manager_xra
       /* Something else changed -- tell the world about it. */
       meta_monitor_manager_rebuild_derived (manager);
     }
+  meta_verbose ("xrandr reconfiguration done\n");
+  return;
+}
+
+gboolean
+meta_monitor_manager_xrandr_handle_xevent (MetaMonitorManagerXrandr *manager_xrandr,
+					   XEvent                   *event)
+{
+  MetaMonitorManager *manager = META_MONITOR_MANAGER (manager_xrandr);
+  gboolean hotplug = FALSE;
+
+  int type = (event->type - manager_xrandr->rr_event_base);
+
+  if ((event->type - manager_xrandr->rr_event_base) != RRScreenChangeNotify)
+    return FALSE;
+
+#if defined(__mips__)
+  // wait for a period to consolidate for signal
+  g_usleep(1000000);
+#endif
+
+  XRRUpdateConfiguration (event);
+
+#if defined(__mips__)
+  idle_check_randr_configuration(manager_xrandr);
+  return TRUE;
+
+#else
+  meta_monitor_manager_read_current_config (manager);
+
+  hotplug = manager_xrandr->resources->timestamp < manager_xrandr->resources->configTimestamp;
+  meta_verbose ("monitor hotplug = %d\n", hotplug);
+
+  if (hotplug)
+    {
+      /* This is a hotplug event, so go ahead and build a new configuration. */
+      meta_monitor_manager_on_hotplug (manager);
+    }
+  else
+    {
+      /* Something else changed -- tell the world about it. */
+      meta_monitor_manager_rebuild_derived (manager);
+    }
+#endif
 
   return TRUE;
 }

@@ -82,6 +82,20 @@ typedef enum
 } MetaMaximizeFlags;
 
 /**
+ * MetaTileSide
+ * @META_TILE_SIDE_NONE: none
+ * @META_TILE_SIDE_LEFT: left
+ * @META_TILE_SIDE_RIGHT: right
+ * for user tile request
+ */
+typedef enum
+{
+    META_TILE_SIDE_NONE,
+    META_TILE_SIDE_LEFT,
+    META_TILE_SIDE_RIGHT,
+} MetaTileSide;
+
+/**
  * MetaWindowClientType:
  * @META_WINDOW_CLIENT_TYPE_WAYLAND: A Wayland based window
  * @META_WINDOW_CLIENT_TYPE_X11: An X11 based window
@@ -145,6 +159,7 @@ const char * meta_window_get_gtk_application_object_path (MetaWindow *window);
 const char * meta_window_get_gtk_window_object_path (MetaWindow *window);
 const char * meta_window_get_gtk_app_menu_object_path (MetaWindow *window);
 const char * meta_window_get_gtk_menubar_object_path (MetaWindow *window);
+const char * meta_window_get_flatpak_appid (MetaWindow *window);
 
 void meta_window_move_frame(MetaWindow *window, gboolean user_op, int root_x_nw, int root_y_nw);
 void meta_window_move_resize_frame (MetaWindow *window, gboolean user_op, int root_x_nw, int root_y_nw, int w, int h);
@@ -194,6 +209,8 @@ void meta_window_maximize   (MetaWindow        *window,
                              MetaMaximizeFlags  directions);
 void meta_window_unmaximize (MetaWindow        *window,
                              MetaMaximizeFlags  directions);
+void        meta_window_set_showing        (MetaWindow  *window, 
+                                            gboolean val);
 void        meta_window_minimize           (MetaWindow  *window);
 void        meta_window_unminimize         (MetaWindow  *window);
 void        meta_window_raise              (MetaWindow  *window);
@@ -215,6 +232,7 @@ MetaFrameType meta_window_get_frame_type (MetaWindow *window);
 cairo_region_t *meta_window_get_frame_bounds (MetaWindow *window);
 
 MetaWindow *meta_window_get_tile_match (MetaWindow *window);
+MetaWindow *meta_window_get_tile_counterpart (MetaWindow *window);
 
 void        meta_window_make_fullscreen    (MetaWindow  *window);
 void        meta_window_unmake_fullscreen  (MetaWindow  *window);
@@ -233,6 +251,9 @@ void        meta_window_focus              (MetaWindow  *window,
 
 void        meta_window_check_alive        (MetaWindow  *window,
                                             guint32      timestamp);
+void        meta_window_tile_by_side       (MetaWindow        *window,
+                                            MetaTileSide side);
+void        meta_window_begin_to_move      (MetaWindow        *window);
 
 void meta_window_get_work_area_current_monitor (MetaWindow    *window,
                                                 MetaRectangle *area);
@@ -256,6 +277,8 @@ gboolean meta_window_is_above (MetaWindow *window);
 gboolean meta_window_allows_move (MetaWindow *window);
 gboolean meta_window_allows_resize (MetaWindow *window);
 gboolean meta_window_is_client_decorated (MetaWindow *window);
+gboolean meta_window_can_tile_side_by_side (MetaWindow *window);
+MetaTileSide meta_window_get_tile_mode (MetaWindow *window);
 
 gboolean meta_window_titlebar_is_onscreen    (MetaWindow *window);
 void     meta_window_shove_titlebar_onscreen (MetaWindow *window);

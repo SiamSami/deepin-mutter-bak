@@ -398,6 +398,7 @@ void                meta_monitor_manager_confirm_configuration (MetaMonitorManag
 
 void               meta_output_parse_edid (MetaOutput *output,
                                            GBytes     *edid);
+gboolean           meta_output_is_laptop  (MetaOutput *output);
 
 void               meta_crtc_info_free   (MetaCRTCInfo   *info);
 void               meta_output_info_free (MetaOutputInfo *info);
@@ -413,6 +414,10 @@ gboolean           meta_monitor_manager_get_monitor_matrix (MetaMonitorManager *
 gint               meta_monitor_manager_get_monitor_at_point (MetaMonitorManager *manager,
                                                               gfloat              x,
                                                               gfloat              y);
+
+void meta_monitor_manager_clear_output (MetaOutput *output);
+void meta_monitor_manager_clear_mode (MetaMonitorMode *mode);
+void meta_monitor_manager_clear_crtc (MetaCRTC *crtc);
 
 /* Returns true if transform causes width and height to be inverted
    This is true for the odd transforms in the enum */

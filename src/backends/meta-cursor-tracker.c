@@ -198,6 +198,7 @@ ensure_xfixes_cursor (MetaCursorTracker *tracker)
   guint8 *cursor_data;
   gboolean free_cursor_data;
   CoglContext *ctx;
+  CoglError *error = NULL;
 
   if (tracker->xfixes_cursor)
     return;
@@ -239,10 +240,16 @@ ensure_xfixes_cursor (MetaCursorTracker *tracker)
                                           CLUTTER_CAIRO_FORMAT_ARGB32,
                                           cursor_image->width * 4, /* stride */
                                           cursor_data,
-                                          NULL);
+                                          &error);
 
   if (free_cursor_data)
     g_free (cursor_data);
+
+  if (error != NULL)
+    {
+      meta_warning ("Failed to allocate cursor sprite texture: %s\n", error->message);
+      cogl_error_free (error);
+    }
 
   if (sprite != NULL)
     {
@@ -361,12 +368,12 @@ get_pointer_position_gdk (int         *x,
                           int         *y,
                           int         *mods)
 {
-  GdkDeviceManager *gmanager;
+  GdkSeat *gseat;
   GdkDevice *gdevice;
   GdkScreen *gscreen;
 
-  gmanager = gdk_display_get_device_manager (gdk_display_get_default ());
-  gdevice = gdk_x11_device_manager_lookup (gmanager, META_VIRTUAL_CORE_POINTER_ID);
+  gseat = gdk_display_get_default_seat (gdk_display_get_default ());
+  gdevice = gdk_seat_get_pointer (gseat);
 
   gdk_device_get_position (gdevice, &gscreen, x, y);
   if (mods)

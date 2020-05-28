@@ -130,6 +130,7 @@ struct _MetaWindow
   char *gtk_window_object_path;
   char *gtk_app_menu_object_path;
   char *gtk_menubar_object_path;
+  char *flatpak_appid;
 
   int hide_titlebar_when_maximized;
   int net_wm_pid;
@@ -147,6 +148,10 @@ struct _MetaWindow
 
   /* Whether this is an override redirect window or not */
   guint override_redirect : 1;
+  /* deepin specialized flag to make a normal window bypass some controls
+   * of wm. e.g constraints 
+   */
+  guint deepin_override: 1;
 
   /* Whether we're maximized */
   guint maximized_horizontally : 1;
@@ -290,7 +295,7 @@ struct _MetaWindow
   guint wm_state_above : 1;
   guint wm_state_below : 1;
 
-  /* EWHH demands attention flag */
+  /* EWMH demands attention flag */
   guint wm_state_demands_attention : 1;
 
   /* TRUE iff window == window->display->focus_window */
@@ -354,6 +359,17 @@ struct _MetaWindow
   /* if non-NULL, the opaque region _NET_WM_OPAQUE_REGION */
   cairo_region_t *opaque_region;
 
+  /* if non-NULL, the background blur region _NET_WM_DEEPIN_BLUR_REGION or 
+   * _NET_WM_DEEPIN_BLUR_REGION_ROUNDED
+   **/
+  cairo_region_t *deepin_blur_region;
+
+  /* radius (xr, yr) list for deepin_blur_region if any */
+  GArray *deepin_blur_radiuses; 
+
+  /* for representing discreted shaped blur area */
+  cairo_surface_t *deepin_blur_mask;
+
   /* the input shape region for picking */
   cairo_region_t *input_region;
 
@@ -380,6 +396,7 @@ struct _MetaWindow
    * is withdrawing the window.
    */
   int unmaps_pending;
+  guint last_unmap_serial;
 
   /* See docs for meta_window_get_stable_sequence() */
   guint32 stable_sequence;
@@ -443,6 +460,12 @@ struct _MetaWindow
 
   /* The currently complementary tiled window, if any */
   MetaWindow *tile_match;
+  /* DEEPIN: the currently complementary tiled window, if any. 
+   * It has no constraints as tile_match above, like no intersection windows 
+   * inbetween. and we assumes only two tiled windows at most in the same 
+   * monitor.
+   */
+  MetaWindow *tile_counterpart;
 
   /* Bypass compositor hints */
   guint bypass_compositor;
@@ -508,6 +531,11 @@ struct _MetaWindowClass
                                          ((w)->size_hints.min_height < (w)->size_hints.max_height)))
 #define META_WINDOW_ALLOWS_HORIZONTAL_RESIZE(w) (META_WINDOW_ALLOWS_RESIZE_EXCEPT_HINTS (w) && (w)->size_hints.min_width < (w)->size_hints.max_width)
 #define META_WINDOW_ALLOWS_VERTICAL_RESIZE(w)   (META_WINDOW_ALLOWS_RESIZE_EXCEPT_HINTS (w) && (w)->size_hints.min_height < (w)->size_hints.max_height)
+//deepin addons
+#define META_WINDOW_ALLOWS_TILED_RESIZE_LEFT(w)   ((w)->has_resize_func && \
+                                                   !META_WINDOW_TILED_LEFT (w))
+#define META_WINDOW_ALLOWS_TILED_RESIZE_RIGHT(w)   ((w)->has_resize_func && \
+                                                    !META_WINDOW_TILED_RIGHT (w))
 
 MetaWindow * _meta_window_shared_new       (MetaDisplay         *display,
                                             MetaScreen          *screen,
@@ -587,7 +615,8 @@ GList* meta_window_get_workspaces (MetaWindow *window);
 int meta_window_get_current_tile_monitor_number (MetaWindow *window);
 void meta_window_get_current_tile_area         (MetaWindow    *window,
                                                 MetaRectangle *tile_area);
-
+void meta_window_get_current_tile_area_constrianted (MetaWindow    *window,
+                                                     MetaRectangle *tile_area);
 
 gboolean meta_window_same_application (MetaWindow *window,
                                        MetaWindow *other_window);
@@ -626,9 +655,9 @@ void meta_window_update_for_monitors_changed (MetaWindow *window);
 void meta_window_on_all_workspaces_changed (MetaWindow *window);
 
 gboolean meta_window_should_attach_to_parent (MetaWindow *window);
-gboolean meta_window_can_tile_side_by_side   (MetaWindow *window);
 
 void meta_window_compute_tile_match (MetaWindow *window);
+void meta_window_compute_tile_counterpart (MetaWindow *window);
 
 gboolean meta_window_updates_are_frozen (MetaWindow *window);
 
@@ -637,6 +666,8 @@ void meta_window_set_title                (MetaWindow *window,
 void meta_window_set_wm_class             (MetaWindow *window,
                                            const char *wm_class,
                                            const char *wm_instance);
+void meta_window_set_flatpak_appid        (MetaWindow *window,
+                                           const char *id);
 void meta_window_set_gtk_dbus_properties  (MetaWindow *window,
                                            const char *application_id,
                                            const char *unique_bus_name,

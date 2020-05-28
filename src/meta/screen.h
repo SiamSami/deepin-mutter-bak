@@ -62,6 +62,11 @@ MetaWorkspace *meta_screen_append_new_workspace (MetaScreen    *screen,
                                                  gboolean       activate,
                                                  guint32        timestamp);
 
+void meta_screen_reorder_workspace (MetaScreen    *screen,
+                                   MetaWorkspace *workspace,
+                                   int            new_index,
+                                   guint32        timestamp);
+
 int meta_screen_get_active_workspace_index (MetaScreen *screen);
 
 MetaWorkspace * meta_screen_get_active_workspace (MetaScreen *screen);
@@ -128,4 +133,12 @@ void meta_screen_override_workspace_layout (MetaScreen      *screen,
 void          meta_screen_set_cursor          (MetaScreen                 *screen,
                                                MetaCursor                  cursor);
 
+void          meta_screen_enter_corner        (MetaScreen                 *screen,
+                                               MetaScreenCorner            corner);
+void          meta_screen_leave_corner        (MetaScreen                 *screen,
+                                               MetaScreenCorner            corner);
+void          meta_screen_enable_corner_actions (MetaScreen *screen, gboolean enable);
+void          meta_screen_enable_corner        (MetaScreen                 *screen,
+                                               MetaScreenCorner            corner, 
+                                               gboolean                    val);
 #endif

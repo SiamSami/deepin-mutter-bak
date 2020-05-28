@@ -1,8 +1,8 @@
 AC_PREREQ(2.62)
 
 m4_define([mutter_major_version], [3])
-m4_define([mutter_minor_version], [18])
-m4_define([mutter_micro_version], [1])
+m4_define([mutter_minor_version], [20])
+m4_define([mutter_micro_version], [3])
 
 m4_define([mutter_version],
           [mutter_major_version.mutter_minor_version.mutter_micro_version])
@@ -49,6 +49,7 @@ IT_PROG_INTLTOOL([0.41])
 AC_PROG_CC
 AC_PROG_CC_C_O
 AC_PROG_INSTALL
+AC_PROG_SED
 AC_HEADER_STDC
 PKG_PROG_PKG_CONFIG([0.21])
 
@@ -61,12 +62,12 @@ CANBERRA_GTK_VERSION=0.26
 CLUTTER_PACKAGE=clutter-1.0
 
 MUTTER_PC_MODULES="
-   gtk+-3.0 >= 3.9.11
+   gtk+-3.0 >= 3.19.8
    gio-unix-2.0 >= 2.35.1
    pango >= 1.2.0
    cairo >= 1.10.0
-   gsettings-desktop-schemas >= 3.15.92
-   $CLUTTER_PACKAGE >= 1.23.4
+   gsettings-desktop-schemas >= 3.19.3
+   $CLUTTER_PACKAGE >= 1.25.6
    cogl-1.0 >= 1.17.1
    upower-glib >= 0.99.0
    gnome-desktop-3.0
@@ -193,6 +194,10 @@ PKG_CHECK_MODULES(MUTTER, $MUTTER_PC_MODULES)
 
 MUTTER_NATIVE_BACKEND_MODULES="clutter-egl-1.0 libdrm libsystemd libinput gudev-1.0 gbm >= 10.3"
 
+if $PKG_CONFIG --exists "gudev-1.0 >= 232"; then
+    AC_DEFINE([HAVE_LIBGUDEV232], 1, [Building with gudev version 232])
+fi
+
 AC_ARG_ENABLE(native-backend,
   AS_HELP_STRING([--disable-native-backend], [disable mutter native (KMS) backend]),,
   enable_native_backend=auto
@@ -222,6 +227,10 @@ AS_IF([test "$have_wayland" = "yes"], [
     [AC_MSG_ERROR([Could not find wayland-scanner in your PATH, required for parsing wayland extension protocols])])
   AC_SUBST([WAYLAND_SCANNER])
   AC_DEFINE([HAVE_WAYLAND],[1],[Define if you want to enable Wayland support])
+
+  PKG_CHECK_MODULES(WAYLAND_PROTOCOLS, [wayland-protocols >= 1.1],
+		    [ac_wayland_protocols_pkgdatadir=`$PKG_CONFIG --variable=pkgdatadir wayland-protocols`])
+  AC_SUBST(WAYLAND_PROTOCOLS_DATADIR, $ac_wayland_protocols_pkgdatadir)
 ])
 AM_CONDITIONAL([HAVE_WAYLAND],[test "$have_wayland" = "yes"])
 

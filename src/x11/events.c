@@ -684,7 +684,7 @@ meta_spew_event_print (MetaDisplay *display,
     return;
 
   event_str = meta_spew_event (display, event);
-  g_print ("%s\n", event_str);
+  meta_topic (META_DEBUG_EVENTS, "%s\n", event_str);
   g_free (event_str);
 }
 
@@ -846,6 +846,7 @@ handle_input_xevent (MetaDisplay  *display,
     {
     case XI_Enter:
     case XI_Leave:
+    case XI_Motion:
     case XI_FocusIn:
     case XI_FocusOut:
       break;
@@ -1162,6 +1163,30 @@ process_selection_clear (MetaDisplay   *display,
   return TRUE;
 }
 
+static void
+notify_bell (MetaDisplay *display,
+             XkbAnyEvent *xkb_ev)
+{
+  XkbBellNotifyEvent *xkb_bell_event = (XkbBellNotifyEvent*) xkb_ev;
+  MetaWindow *window;
+
+  window = meta_display_lookup_x_window (display, xkb_bell_event->window);
+  if (!window && display->focus_window && display->focus_window->frame)
+    window = display->focus_window;
+
+  display->last_bell_time = xkb_ev->time;
+  if (!meta_bell_notify (display, window) &&
+      meta_prefs_bell_is_audible ())
+    {
+      /* Force a classic bell if the libcanberra bell failed. */
+      XkbForceDeviceBell (display->xdisplay,
+                          xkb_bell_event->device,
+                          xkb_bell_event->bell_class,
+                          xkb_bell_event->bell_id,
+                          xkb_bell_event->percent);
+    }
+}
+
 static gboolean
 handle_other_xevent (MetaDisplay *display,
                      XEvent      *event)
@@ -1308,7 +1333,7 @@ handle_other_xevent (MetaDisplay *display,
               window->frame == NULL)
             meta_display_end_grab_op (display, timestamp);
 
-          if (!frame_was_receiver)
+          if (!frame_was_receiver && window->last_unmap_serial != event->xany.serial)
             {
               if (window->unmaps_pending == 0)
                 {
@@ -1329,13 +1354,16 @@ handle_other_xevent (MetaDisplay *display,
                               window->unmaps_pending);
                 }
             }
+          if (window)
+            window->last_unmap_serial = event->xany.serial;
         }
       break;
     case MapNotify:
       /* NB: override redirect windows wont cause a map request so we
        * watch out for map notifies against any root windows too if a
        * compositor is enabled: */
-      if (window == NULL && event->xmap.event == display->screen->xroot)
+      if (window == NULL && event->xmap.event == display->screen->xroot &&
+          event->xmap.override_redirect)
         {
           window = meta_window_x11_new (display, event->xmap.window,
                                         FALSE, META_COMP_EFFECT_CREATE);
@@ -1618,8 +1646,7 @@ handle_other_xevent (MetaDisplay *display,
               if (XSERVER_TIME_IS_BEFORE(display->last_bell_time,
                                          xkb_ev->time - 100))
                 {
-                  display->last_bell_time = xkb_ev->time;
-                  meta_bell_notify (display, xkb_ev);
+                  notify_bell (display, xkb_ev);
                 }
               break;
             default:
@@ -1667,17 +1694,16 @@ meta_display_handle_xevent (MetaDisplay *display,
   gboolean bypass_compositor = FALSE, bypass_gtk = FALSE;
   XIEvent *input_event;
 
-#if 0
+#if 1
   meta_spew_event_print (display, event);
 #endif
 
-#ifdef HAVE_STARTUP_NOTIFICATION
-  if (sn_display_process_event (display->sn_display, event))
+  if (meta_startup_notification_handle_xevent (display->startup_notification,
+                                               event))
     {
       bypass_gtk = bypass_compositor = TRUE;
       goto out;
     }
-#endif
 
 #ifdef HAVE_WAYLAND
   if (meta_is_wayland_compositor () &&
@@ -1717,6 +1743,33 @@ meta_display_handle_xevent (MetaDisplay *display,
   modified = event_get_modified_window (display, event);
 
   input_event = get_input_event (display, event);
+
+  if (display->screen->corner_actions_enabled)
+    {
+      int i;
+      MetaScreenCorner corners[] = {
+          META_SCREEN_TOPLEFT,
+          META_SCREEN_TOPRIGHT,
+          META_SCREEN_BOTTOMLEFT,
+          META_SCREEN_BOTTOMRIGHT,
+      };
+
+      for (i = 0; i < 4; i++) 
+       {
+         if (event->xany.window == display->screen->corner_windows[i]) 
+           {
+             if (event->xany.type == EnterNotify) {
+               meta_screen_enter_corner (display->screen, corners[i]);
+             } else if (event->xany.type == LeaveNotify) {
+               /*meta_screen_leave_corner (display->screen, META_SCREEN_TOPLEFT);*/
+             }
+
+             bypass_gtk = bypass_compositor = TRUE;
+             goto out;
+           }
+       }
+    }
+
 
   if (event->type == UnmapNotify)
     {

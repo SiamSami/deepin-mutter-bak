@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Jasper St. Pierre <jstpierre@mecheye.net>
@@ -326,6 +326,10 @@ gboolean
 meta_parse_accelerator (const char   *accel,
                         MetaKeyCombo *combo)
 {
+  g_return_val_if_fail (combo != NULL, FALSE);
+
+  *combo = (MetaKeyCombo) { 0 };
+
   if (!accel[0] || strcmp (accel, "disabled") == 0)
     return TRUE;
 
@@ -336,7 +340,11 @@ gboolean
 meta_parse_modifier (const char          *accel,
                      MetaVirtualModifier *mask)
 {
-  MetaKeyCombo combo;
+  MetaKeyCombo combo = { 0 };
+
+  g_return_val_if_fail (mask != NULL, FALSE);
+
+  *mask = 0;
 
   if (accel == NULL || !accel[0] || strcmp (accel, "disabled") == 0)
     return TRUE;

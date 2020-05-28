@@ -125,6 +125,7 @@ enum
   SHOW_RESTART_MESSAGE,
   RESTART,
   SHOW_RESIZE_POPUP,
+  UNABLE_TO_OPERATE,
   LAST_SIGNAL
 };
 
@@ -342,6 +343,15 @@ meta_display_class_init (MetaDisplayClass *klass)
                   G_TYPE_BOOLEAN, 4,
                   G_TYPE_BOOLEAN, META_TYPE_RECTANGLE, G_TYPE_INT, G_TYPE_INT);
 
+  display_signals[UNABLE_TO_OPERATE] =
+    g_signal_new ("unable-to-operate",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0,
+                  NULL, NULL, NULL,
+                  G_TYPE_NONE, 1,
+                  META_TYPE_WINDOW);
+
   g_object_class_install_property (object_class,
                                    PROP_FOCUS_WINDOW,
                                    g_param_spec_object ("focus-window",
@@ -399,28 +409,6 @@ meta_display_remove_pending_pings_for_window (MetaDisplay *display,
   g_slist_free (dead);
 }
 
-
-#ifdef HAVE_STARTUP_NOTIFICATION
-static void
-sn_error_trap_push (SnDisplay *sn_display,
-                    Display   *xdisplay)
-{
-  MetaDisplay *display;
-  display = meta_display_for_x_display (xdisplay);
-  if (display != NULL)
-    meta_error_trap_push (display);
-}
-
-static void
-sn_error_trap_pop (SnDisplay *sn_display,
-                   Display   *xdisplay)
-{
-  MetaDisplay *display;
-  display = meta_display_for_x_display (xdisplay);
-  if (display != NULL)
-    meta_error_trap_pop (display);
-}
-#endif
 
 static void
 enable_compositor (MetaDisplay *display)
@@ -527,6 +515,20 @@ gesture_tracker_state_changed (MetaGestureTracker   *tracker,
     }
 }
 
+static void
+on_startup_notification_changed (MetaStartupNotification *sn,
+                                 gpointer                 sequence,
+                                 MetaDisplay             *display)
+{
+  if (!display->screen)
+    return;
+
+  g_slist_free (display->screen->startup_sequences);
+  display->screen->startup_sequences =
+    meta_startup_notification_get_sequences (display->startup_notification);
+  g_signal_emit_by_name (display->screen, "startup-sequence-changed", sequence);
+}
+
 /**
  * meta_display_open:
  *
@@ -629,12 +631,6 @@ meta_display_open (void)
   display->groups_by_leader = NULL;
 
   display->screen = NULL;
-
-#ifdef HAVE_STARTUP_NOTIFICATION
-  display->sn_display = sn_display_new (display->xdisplay,
-                                        sn_error_trap_push,
-                                        sn_error_trap_pop);
-#endif
 
   /* Get events */
   meta_display_init_events (display);
@@ -916,11 +912,16 @@ meta_display_open (void)
 
   display->screen = screen;
 
+  display->startup_notification = meta_startup_notification_get (display);
+  g_signal_connect (display->startup_notification, "changed",
+                    G_CALLBACK (on_startup_notification_changed), display);
+
   meta_screen_init_workspaces (screen);
 
   enable_compositor (display);
 
   meta_screen_create_guard_window (screen);
+  meta_screen_create_corner_window (screen);
 
   /* Set up touch support */
   display->gesture_tracker = meta_gesture_tracker_new ();
@@ -1100,6 +1101,7 @@ meta_display_close (MetaDisplay *display,
 
   meta_display_remove_autoraise_callback (display);
 
+  g_clear_object (&display->startup_notification);
   g_clear_object (&display->gesture_tracker);
 
   if (display->focus_timeout_id)
@@ -1111,14 +1113,6 @@ meta_display_close (MetaDisplay *display,
   meta_display_free_events (display);
 
   meta_screen_free (display->screen, timestamp);
-
-#ifdef HAVE_STARTUP_NOTIFICATION
-  if (display->sn_display)
-    {
-      sn_display_unref (display->sn_display);
-      display->sn_display = NULL;
-    }
-#endif
 
   /* Must be after all calls to meta_window_unmanage() since they
    * unregister windows
@@ -1229,7 +1223,7 @@ meta_grab_op_is_moving (MetaGrabOp op)
 }
 
 /**
- * meta_grab_op_windows_are_interactable:
+ * meta_display_windows_are_interactable:
  * @op: A #MetaGrabOp
  *
  * Whether windows can be interacted with.
@@ -1963,6 +1957,16 @@ meta_display_end_grab_op (MetaDisplay *display,
   meta_topic (META_DEBUG_WINDOW_OPS,
               "Ending grab op %u at time %u\n", grab_op, timestamp);
 
+  meta_topic (META_DEBUG_WINDOW_OPS,
+              "grab_have_pointer %d", display->grab_have_pointer);
+
+  /*if (display->grab_have_pointer)*/
+    {
+      MetaBackend *backend = meta_get_backend ();
+      meta_backend_ungrab_device (backend, META_VIRTUAL_CORE_POINTER_ID, timestamp);
+    }
+
+
   if (display->event_route == META_EVENT_ROUTE_NORMAL ||
       display->event_route == META_EVENT_ROUTE_COMPOSITOR_GRAB)
     return;
@@ -2210,7 +2214,10 @@ meta_display_ping_timeout (gpointer data)
   MetaWindow *window = ping_data->window;
   MetaDisplay *display = window->display;
 
+#if !defined(__mips__)
+  // disable aliveness checking
   meta_window_set_alive (window, FALSE);
+#endif
 
   ping_data->ping_timeout_id = 0;
 
@@ -2311,7 +2318,9 @@ meta_display_pong_for_serial (MetaDisplay    *display,
               ping_data->ping_timeout_id = 0;
             }
 
+#if !defined(__mips__)
           meta_window_set_alive (ping_data->window, TRUE);
+#endif
           ping_data_free (ping_data);
           break;
         }

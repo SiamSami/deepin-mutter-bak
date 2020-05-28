@@ -31,6 +31,7 @@
 #include "meta-monitor-manager-private.h"
 #include "meta-cullable.h"
 
+#include "meta/meta-blur-actor.h"
 #include "meta-surface-actor.h"
 #include "meta-surface-actor-x11.h"
 
@@ -51,6 +52,7 @@ struct _MetaWindowActorPrivate
   MetaCompositor *compositor;
 
   MetaSurfaceActor *surface;
+  MetaBlurActor *blur_background;
 
   /* MetaShadowFactory only caches shadows that are actually in use;
    * to avoid unnecessary recomputation we do two things: 1) we store
@@ -70,6 +72,8 @@ struct _MetaWindowActorPrivate
   cairo_region_t   *shape_region;
   /* The region we should clip to when painting the shadow */
   cairo_region_t   *shadow_clip;
+  /* right now, only one rectangle included */
+  cairo_region_t   *deepin_blur_region;
 
   /* Extracted size-invariant shape used for shadows */
   MetaWindowShape  *shadow_shape;
@@ -93,6 +97,7 @@ struct _MetaWindowActorPrivate
   gint              size_change_in_progress;
   gint              map_in_progress;
   gint              destroy_in_progress;
+  gint              tile_in_progress;
 
   /* List of FrameData for recent frames */
   GList            *frames;
@@ -431,6 +436,38 @@ meta_window_actor_update_surface (MetaWindowActor *self)
   set_surface (self, surface_actor);
 }
 
+void
+meta_window_actor_update_blur_background (MetaWindowActor *self)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+  MetaWindow *window = priv->window;
+
+  if (window->deepin_blur_region == NULL) 
+    {
+      if (priv->blur_background) 
+        {
+            g_clear_pointer (&priv->deepin_blur_region, cairo_region_destroy);
+          clutter_actor_remove_child (CLUTTER_ACTOR (self), CLUTTER_ACTOR (priv->blur_background));
+          priv->blur_background = NULL;
+        }
+    }
+  else 
+    {
+      if (!priv->blur_background) 
+        {
+          priv->blur_background = meta_blur_actor_new (window->screen);
+          meta_blur_actor_set_radius (priv->blur_background, 25);
+          clutter_actor_insert_child_below (CLUTTER_ACTOR (self), CLUTTER_ACTOR (priv->blur_background), NULL);
+        }
+
+      //FIXME: what if shape changed, and blur_region intersected with the shape
+      if (window->deepin_blur_mask)
+        meta_blur_actor_set_blur_mask (priv->blur_background, window->deepin_blur_mask);
+      meta_window_actor_update_blur_region (self);
+    }
+
+}
+
 static void
 meta_window_actor_constructed (GObject *object)
 {
@@ -441,6 +478,8 @@ meta_window_actor_constructed (GObject *object)
   priv->compositor = window->display->compositor;
 
   meta_window_actor_update_surface (self);
+
+  meta_window_actor_update_blur_background (self);
 
   meta_window_actor_update_opacity (self);
 
@@ -469,6 +508,8 @@ meta_window_actor_dispose (GObject *object)
 
   g_clear_pointer (&priv->shape_region, cairo_region_destroy);
   g_clear_pointer (&priv->shadow_clip, cairo_region_destroy);
+  if (priv->deepin_blur_region)
+    g_clear_pointer (&priv->deepin_blur_region, cairo_region_destroy);
 
   g_clear_pointer (&priv->shadow_class, g_free);
   g_clear_pointer (&priv->focused_shadow, meta_shadow_unref);
@@ -480,6 +521,12 @@ meta_window_actor_dispose (GObject *object)
   g_clear_object (&priv->window);
 
   set_surface (self, NULL);
+
+  if (priv->blur_background)
+    {
+      clutter_actor_remove_child (CLUTTER_ACTOR (self), CLUTTER_ACTOR (priv->blur_background));
+      priv->blur_background = NULL;
+    }
 
   G_OBJECT_CLASS (meta_window_actor_parent_class)->dispose (object);
 }
@@ -1045,7 +1092,8 @@ meta_window_actor_effect_in_progress (MetaWindowActor *self)
   return (self->priv->minimize_in_progress ||
 	  self->priv->size_change_in_progress ||
 	  self->priv->map_in_progress ||
-	  self->priv->destroy_in_progress);
+	  self->priv->destroy_in_progress ||
+      self->priv->tile_in_progress);
 }
 
 static gboolean
@@ -1086,6 +1134,9 @@ start_simple_effect (MetaWindowActor  *self,
     break;
   case META_PLUGIN_DESTROY:
     counter = &priv->destroy_in_progress;
+    break;
+  case META_PLUGIN_TILE:
+    counter = &priv->tile_in_progress;
     break;
   case META_PLUGIN_SIZE_CHANGE:
   case META_PLUGIN_SWITCH_WORKSPACE:
@@ -1192,6 +1243,16 @@ meta_window_actor_effect_completed (MetaWindowActor  *self,
 	priv->size_change_in_progress = 0;
       }
     break;
+  case META_PLUGIN_TILE:
+    {
+      priv->tile_in_progress--;
+      if (priv->tile_in_progress < 0)
+       {
+         g_warning ("Error in tile accounting.");
+         priv->tile_in_progress = 0;
+       }
+    }
+    break;
   case META_PLUGIN_SWITCH_WORKSPACE:
     g_assert_not_reached ();
     break;
@@ -1288,6 +1349,8 @@ meta_window_actor_sync_actor_geometry (MetaWindowActor *self,
   if (meta_window_actor_effect_in_progress (self))
     return;
 
+  meta_verbose ("%s: %d,%d, %d,%d\n", __func__, window_rect.x, window_rect.y,
+          window_rect.width, window_rect.height);
   clutter_actor_set_position (CLUTTER_ACTOR (self),
                               window_rect.x, window_rect.y);
   clutter_actor_set_size (CLUTTER_ACTOR (self),
@@ -1324,6 +1387,7 @@ meta_window_actor_show (MetaWindowActor   *self,
   if (compositor->switch_workspace_in_progress ||
       !start_simple_effect (self, event))
     {
+        meta_verbose ("%s: ", __func__);
       clutter_actor_show (CLUTTER_ACTOR (self));
     }
 }
@@ -1364,6 +1428,43 @@ meta_window_actor_hide (MetaWindowActor *self,
 
   if (!start_simple_effect (self, event))
     clutter_actor_hide (CLUTTER_ACTOR (self));
+}
+
+void
+meta_window_actor_tile (MetaWindowActor *self,
+                        MetaCompEffect   effect)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+  MetaCompositor *compositor = priv->compositor;
+  MetaPluginEffect event;
+
+  g_return_if_fail (priv->visible);
+
+  /* If a plugin is animating a workspace transition, we have to
+   * hold off on hiding the window, and do it after the workspace
+   * switch completes
+   */
+  if (compositor->switch_workspace_in_progress)
+    return;
+
+  /* this means an iteractive dual-tiling is running
+   */
+  if (priv->tile_in_progress)
+      return;
+
+  switch (effect)
+    {
+    case META_COMP_EFFECT_TILE:
+      event = META_PLUGIN_TILE;
+      break;
+    case META_COMP_EFFECT_NONE:
+      event = META_PLUGIN_NONE;
+      break;
+    default:
+      g_assert_not_reached();
+    }
+
+  start_simple_effect (self, event);
 }
 
 void
@@ -1408,6 +1509,10 @@ meta_window_actor_new (MetaWindow *window)
   else
     priv->first_frame_state = DRAWING_FIRST_FRAME;
 
+  meta_verbose ("%s: first_frame_state %s, exted_sync_req_ctr: %d\n",
+          __func__, is_frozen(self) ? "frozen": "draw",
+          priv->window->extended_sync_request_counter);
+
   /* If a window doesn't start off with updates frozen, we should
    * we should send a _NET_WM_FRAME_DRAWN immediately after the first drawn.
    */
@@ -1427,6 +1532,7 @@ meta_window_actor_new (MetaWindow *window)
   clutter_actor_add_child (window_group, CLUTTER_ACTOR (self));
 
   clutter_actor_hide (CLUTTER_ACTOR (self));
+  clutter_actor_set_name (CLUTTER_ACTOR (self), window->desc);
 
   /* Initial position in the stack is arbitrary; stacking will be synced
    * before we first paint.
@@ -1752,9 +1858,17 @@ build_and_scan_frame_mask (MetaWindowActor       *self,
     }
   else
     {
+      CoglError *error = NULL;
+
       mask_texture = COGL_TEXTURE (cogl_texture_2d_new_from_data (ctx, tex_width, tex_height,
                                                                   COGL_PIXEL_FORMAT_A_8,
-                                                                  stride, mask_data, NULL));
+                                                                  stride, mask_data, &error));
+
+      if (error)
+        {
+          g_warning ("Failed to allocate mask texture: %s", error->message);
+          cogl_error_free (error);
+        }
     }
 
   meta_shaped_texture_set_mask_texture (stex, mask_texture);
@@ -1874,6 +1988,7 @@ check_needs_reshape (MetaWindowActor *self)
     {
       meta_window_actor_update_input_region (self);
       meta_window_actor_update_opaque_region (self);
+      meta_window_actor_update_blur_region (self);
     }
 
   priv->needs_reshape = FALSE;
@@ -1890,6 +2005,49 @@ meta_window_actor_update_shape (MetaWindowActor *self)
     return;
 
   clutter_actor_queue_redraw (CLUTTER_ACTOR (priv->surface));
+}
+
+void
+meta_window_actor_update_blur_region (MetaWindowActor *self)
+{
+  MetaWindowActorPrivate *priv = self->priv;
+
+  cairo_region_t *blur_region;
+  gboolean argb32 = is_argb32 (self);
+
+  if (argb32 && priv->window->deepin_blur_region != NULL)
+    {
+      cairo_rectangle_int_t client_area;
+      meta_window_get_client_area_rect (priv->window, &client_area);
+
+      blur_region = cairo_region_copy (priv->window->deepin_blur_region);
+      cairo_region_translate (blur_region, client_area.x, client_area.y);
+      if (priv->shape_region) {
+          cairo_region_intersect (blur_region, priv->shape_region);
+      }
+    }
+  else
+    blur_region = NULL;
+
+  if (cairo_region_equal (blur_region, priv->deepin_blur_region)) 
+    return;
+
+  g_clear_pointer (&priv->deepin_blur_region, cairo_region_destroy);
+
+  if (blur_region)
+      priv->deepin_blur_region = blur_region;
+  else
+      priv->deepin_blur_region = cairo_region_create ();
+
+  cairo_rectangle_int_t rect;
+  cairo_region_get_extents (priv->deepin_blur_region, &rect);
+  clutter_actor_set_position (priv->blur_background, rect.x, rect.y);
+  clutter_actor_set_size (priv->blur_background, rect.width, rect.height);
+
+  if (is_frozen (self))
+    return;
+
+  clutter_actor_queue_redraw (CLUTTER_ACTOR (priv->blur_background));
 }
 
 static void
@@ -2118,6 +2276,7 @@ meta_window_actor_set_updates_frozen (MetaWindowActor *self,
 
   updates_frozen = updates_frozen != FALSE;
 
+  meta_verbose ("%s: updates_frozen %d\n", __func__, updates_frozen);
   if (priv->updates_frozen != updates_frozen)
     {
       priv->updates_frozen = updates_frozen;

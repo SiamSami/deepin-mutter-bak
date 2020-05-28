@@ -1,6 +1,5 @@
 desktopfiles_in_files = \
-	mutter.desktop.in \
-	mutter-wayland.desktop.in
+	mutter.desktop.in
 desktopfilesdir = $(datadir)/applications
 desktopfiles_DATA = $(desktopfiles_in_files:.desktop.in=.desktop)
 
@@ -38,7 +37,6 @@ EXTRA_DIST = \
 # rename files with prefix 'deepin-'
 install-data-hook:
 	mv $(DESTDIR)$(desktopfilesdir)/mutter.desktop $(DESTDIR)$(desktopfilesdir)/deepin-mutter.desktop
-	mv $(DESTDIR)$(desktopfilesdir)/mutter-wayland.desktop $(DESTDIR)$(desktopfilesdir)/deepin-mutter-wayland.desktop
 	mv $(DESTDIR)$(xmldir)/50-mutter-navigation.xml $(DESTDIR)$(xmldir)/50-deepin-mutter-navigation.xml
 	mv $(DESTDIR)$(xmldir)/50-mutter-system.xml $(DESTDIR)$(xmldir)/50-deepin-mutter-system.xml
 	mv $(DESTDIR)$(xmldir)/50-mutter-windows.xml $(DESTDIR)$(xmldir)/50-deepin-mutter-windows.xml

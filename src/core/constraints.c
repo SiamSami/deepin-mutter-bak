@@ -94,6 +94,7 @@ typedef enum
   PRIORITY_MINIMUM = 0, /* Dummy value used for loop start = min(all priorities) */
   PRIORITY_ASPECT_RATIO = 0,
   PRIORITY_ENTIRELY_VISIBLE_ON_SINGLE_MONITOR = 0,
+  PRIORITY_KEEP_AT_EDGE = 0,
   PRIORITY_ENTIRELY_VISIBLE_ON_WORKAREA = 1,
   PRIORITY_SIZE_HINTS_INCREMENTS = 1,
   PRIORITY_MAXIMIZATION = 2,
@@ -188,6 +189,10 @@ static gboolean constrain_partially_onscreen (MetaWindow         *window,
                                               ConstraintInfo     *info,
                                               ConstraintPriority  priority,
                                               gboolean            check_only);
+static gboolean constrain_keep_at_edge       (MetaWindow         *window,
+                                              ConstraintInfo     *info,
+                                              ConstraintPriority  priority,
+                                              gboolean            check_only);
 
 static void setup_constraint_info        (ConstraintInfo      *info,
                                           MetaWindow          *window,
@@ -222,6 +227,7 @@ static const Constraint all_constraints[] = {
   {constrain_fully_onscreen,     "constrain_fully_onscreen"},
   {constrain_titlebar_visible,   "constrain_titlebar_visible"},
   {constrain_partially_onscreen, "constrain_partially_onscreen"},
+  /*{constrain_keep_at_edge,       "constrain_keep_at_edge"},*/
   {NULL,                         NULL}
 };
 
@@ -686,6 +692,58 @@ constrain_modal_dialog (MetaWindow         *window,
 }
 
 static gboolean
+constrain_keep_at_edge (MetaWindow         *window,
+                        ConstraintInfo     *info,
+                        ConstraintPriority  priority,
+                        gboolean            check_only)
+{
+  MetaRectangle target_rect;
+  GSList        *all_struts;
+  GSList        *strut_iter;
+  MetaRectangle screen_rect;
+
+  if (priority > PRIORITY_KEEP_AT_EDGE)
+    return TRUE;
+
+  all_struts = window->struts;
+  if (!all_struts) {
+    return TRUE;
+  }
+
+  screen_rect = window->screen->rect;
+  target_rect = (MetaRectangle) {0, 0, screen_rect.width, screen_rect.height};
+
+  for (strut_iter = all_struts; strut_iter; strut_iter = strut_iter->next)
+    {
+      MetaStrut *strut = (MetaStrut*) strut_iter->data;
+
+      if (strut->side == META_SIDE_LEFT)
+        {
+          target_rect.x = strut->rect.x;
+        }
+      else if (strut->side == META_SIDE_RIGHT)
+        {
+          target_rect.x = screen_rect.width - strut->rect.width;
+        }
+      else if (strut->side == META_SIDE_TOP)
+        {
+          target_rect.y = strut->rect.y;
+        }
+      else if (strut->side == META_SIDE_BOTTOM)
+        {
+          target_rect.y = screen_rect.height - strut->rect.height;
+        }
+    }
+
+  if (!meta_rectangle_contains_rect (&target_rect, &info->current))
+    {
+      info->current = target_rect;
+    }
+
+  return TRUE;
+}
+
+static gboolean
 constrain_maximization (MetaWindow         *window,
                         ConstraintInfo     *info,
                         ConstraintPriority  priority,
@@ -779,11 +837,12 @@ constrain_tiling (MetaWindow         *window,
                   ConstraintPriority  priority,
                   gboolean            check_only)
 {
-  MetaRectangle target_size;
+  MetaRectangle target_size, tile_area;
   MetaRectangle min_size, max_size;
   gboolean hminbad, vminbad;
   gboolean horiz_equal, vert_equal;
   gboolean constraint_already_satisfied;
+  int tile_monitor_number;
 
   if (priority > PRIORITY_TILING)
     return TRUE;
@@ -806,9 +865,14 @@ constrain_tiling (MetaWindow         *window,
   if (hminbad || vminbad)
     return TRUE;
 
+  tile_monitor_number = meta_window_get_current_tile_monitor_number (window);
+  meta_window_get_work_area_for_monitor (window, tile_monitor_number, &tile_area);
+
   /* Determine whether constraint is already satisfied; exit if it is */
-  horiz_equal = target_size.x      == info->current.x &&
-                target_size.width  == info->current.width;
+  if (META_WINDOW_TILED_RIGHT(window))
+    horiz_equal = tile_area.x + tile_area.width == info->current.x + info->current.width;
+  else
+    horiz_equal = tile_area.x      == info->current.x;
   vert_equal  = target_size.y      == info->current.y &&
                 target_size.height == info->current.height;
   constraint_already_satisfied = horiz_equal && vert_equal;
@@ -816,8 +880,9 @@ constrain_tiling (MetaWindow         *window,
     return constraint_already_satisfied;
 
   /*** Enforce constraint ***/
-  info->current.x      = target_size.x;
-  info->current.width  = target_size.width;
+  info->current.x      = tile_area.x;
+  if (META_WINDOW_TILED_RIGHT(window))
+      info->current.x      += tile_area.width - info->current.width;
   info->current.y      = target_size.y;
   info->current.height = target_size.height;
 
@@ -1229,7 +1294,7 @@ constrain_to_single_monitor (MetaWindow         *window,
       window->type == META_WINDOW_DOCK      ||
       window->screen->n_monitor_infos == 1  ||
       !window->require_on_single_monitor    ||
-      !window->frame                        ||
+      !(window->frame || meta_window_is_client_decorated(window)) ||
       info->is_user_action)
     return TRUE;
 
@@ -1326,7 +1391,11 @@ constrain_titlebar_visible (MetaWindow         *window,
       vert_amount_onscreen = borders.visible.top;
     }
   else
-    bottom_amount = vert_amount_offscreen;
+    {
+      bottom_amount = vert_amount_offscreen;
+      // wild guess: see comment of meta_window_get_titlebar_rect
+      bottom_amount += 50;
+    }
 
   /* Extend the region, have a helper function handle the constraint,
    * then return the region to its original size.
@@ -1404,7 +1473,11 @@ constrain_partially_onscreen (MetaWindow         *window,
       vert_amount_onscreen = borders.visible.top;
     }
   else
-    bottom_amount = vert_amount_offscreen;
+    {
+      bottom_amount = vert_amount_offscreen;
+      // wild guess: see comment of meta_window_get_titlebar_rect
+      bottom_amount += 50;
+    }
 
   /* Extend the region, have a helper function handle the constraint,
    * then return the region to its original size.

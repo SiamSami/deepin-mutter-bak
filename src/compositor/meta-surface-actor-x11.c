@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  *
  * Written by:
  *     Owen Taylor <otaylor@redhat.com>
@@ -102,8 +102,7 @@ detach_pixmap (MetaSurfaceActorX11 *self)
   priv->pixmap = None;
   meta_error_trap_pop (display);
 
-  cogl_object_unref (priv->texture);
-  priv->texture = NULL;
+  g_clear_pointer (&priv->texture, cogl_object_unref);
 }
 
 static void
@@ -114,14 +113,20 @@ set_pixmap (MetaSurfaceActorX11 *self,
 
   CoglContext *ctx = clutter_backend_get_cogl_context (clutter_get_default_backend ());
   MetaShapedTexture *stex = meta_surface_actor_get_texture (META_SURFACE_ACTOR (self));
+  CoglError *error = NULL;
   CoglTexture *texture;
 
   g_assert (priv->pixmap == None);
   priv->pixmap = pixmap;
 
-  texture = COGL_TEXTURE (cogl_texture_pixmap_x11_new (ctx, priv->pixmap, FALSE, NULL));
+  texture = COGL_TEXTURE (cogl_texture_pixmap_x11_new (ctx, priv->pixmap, FALSE, &error));
 
-  if (G_UNLIKELY (!cogl_texture_pixmap_x11_is_using_tfp_extension (COGL_TEXTURE_PIXMAP_X11 (texture))))
+  if (error != NULL)
+    {
+      g_warning ("Failed to allocate stex texture: %s", error->message);
+      cogl_error_free (error);
+    }
+  else if (G_UNLIKELY (!cogl_texture_pixmap_x11_is_using_tfp_extension (COGL_TEXTURE_PIXMAP_X11 (texture))))
     g_warning ("NOTE: Not using GLX TFP!\n");
 
   priv->texture = texture;
@@ -168,6 +173,8 @@ update_pixmap (MetaSurfaceActorX11 *self)
           return;
         }
 
+      meta_verbose ("%s: xwin 0x%x(%s), pixmap id 0x%x\n", __func__, 
+              xwindow, priv->window? priv->window->desc: NULL, new_pixmap);
       set_pixmap (self, new_pixmap);
     }
 }
@@ -205,6 +212,8 @@ meta_surface_actor_x11_process_damage (MetaSurfaceActor *actor,
         priv->does_full_damage = TRUE;
     }
 
+  meta_verbose ("%s: visible %d, region %d,%d,%d,%d\n", __func__, is_visible(self),
+          x, y, width, height);
   if (!is_visible (self))
     return;
 
@@ -239,6 +248,33 @@ meta_surface_actor_x11_is_visible (MetaSurfaceActor *actor)
 }
 
 static gboolean
+meta_surface_actor_x11_is_opaque (MetaSurfaceActor *actor)
+{
+  MetaSurfaceActorX11 *self = META_SURFACE_ACTOR_X11 (actor);
+  MetaSurfaceActorX11Private *priv = meta_surface_actor_x11_get_instance_private (self);
+
+  /* If we're not ARGB32, then we're opaque. */
+  if (!meta_surface_actor_is_argb32 (actor))
+    return TRUE;
+
+  cairo_region_t *opaque_region = meta_surface_actor_get_opaque_region (actor);
+
+  /* If we have no opaque region, then no pixels are opaque. */
+  if (!opaque_region)
+    return FALSE;
+
+  MetaWindow *window = priv->window;
+  cairo_rectangle_int_t client_area;
+  meta_window_get_client_area_rect (window, &client_area);
+
+  /* Otherwise, check if our opaque region covers our entire surface. */
+  if (cairo_region_contains_rectangle (opaque_region, &client_area) == CAIRO_REGION_OVERLAP_IN)
+    return TRUE;
+
+  return FALSE;
+}
+
+static gboolean
 meta_surface_actor_x11_should_unredirect (MetaSurfaceActor *actor)
 {
   MetaSurfaceActorX11 *self = META_SURFACE_ACTOR_X11 (actor);
@@ -255,14 +291,14 @@ meta_surface_actor_x11_should_unredirect (MetaSurfaceActor *actor)
   if (window->shape_region != NULL)
     return FALSE;
 
-  if (meta_surface_actor_is_argb32 (actor) && !meta_window_requested_bypass_compositor (window))
-    return FALSE;
-
   if (!meta_window_is_monitor_sized (window))
     return FALSE;
 
   if (meta_window_requested_bypass_compositor (window))
     return TRUE;
+
+  if (!meta_surface_actor_x11_is_opaque (actor))
+    return FALSE;
 
   if (meta_window_is_override_redirect (window))
     return TRUE;
@@ -283,6 +319,8 @@ sync_unredirected (MetaSurfaceActorX11 *self)
 
   meta_error_trap_push (display);
 
+  meta_verbose ("%s: win %s, unredirected: %d\n", __func__,
+          meta_window_get_description (priv->window), priv->unredirected);
   if (priv->unredirected)
     {
       detach_pixmap (self);

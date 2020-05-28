@@ -15,8 +15,8 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  */
 
 #ifndef META_MONITOR_MANAGER_H
@@ -33,5 +33,7 @@ MetaMonitorManager *meta_monitor_manager_get  (void);
 
 gint meta_monitor_manager_get_monitor_for_output (MetaMonitorManager *manager,
                                                   guint               id);
+
+gboolean meta_monitor_manager_get_is_builtin_display_on (MetaMonitorManager *manager);
 
 #endif /* META_MONITOR_MANAGER_H */
